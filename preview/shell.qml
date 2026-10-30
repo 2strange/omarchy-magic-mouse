@@ -29,8 +29,7 @@ ShellRoot {
   property real fps: 0
   property int frameCount: 0
   property real peakMajor: 0
-  property real edgeMm: 6
-  property real palmZone: 0.2
+  property var zones: [3, 3, 0, 18]  // left, right, front, back (palm) in mm
 
   function handle(line) {
     var o
@@ -69,8 +68,7 @@ ShellRoot {
       shell.coasting = !!o.coast
       shell.moving = !!o.moving
       shell.axis = o.axis || "y"
-      if (o.edge_mm !== undefined) shell.edgeMm = o.edge_mm
-      if (o.palm !== undefined) shell.palmZone = o.palm
+      if (o.zones) shell.zones = o.zones
     }
   }
 
@@ -123,18 +121,20 @@ ShellRoot {
           width: pad.spanX * pad.scale
           height: pad.spanY * pad.scale
           anchors.horizontalCenter: parent.horizontalCenter
-          radius: width * 0.4
+          radius: width * 0.16
           clip: true
           color: shell.surface
           border.color: shell.scrolling ? shell.roleColor.follow : "#44444c"
           border.width: shell.scrolling ? 3 : 1
 
-          // edge zones (scroll.edge_mm from each side) and the palm zone at the back
-          Rectangle { x: 0; width: shell.edgeMm * shell.unitsPerMm * pad.scale; height: parent.height; color: "#ffffff"; opacity: 0.05 }
-          Rectangle { x: parent.width - width; width: shell.edgeMm * shell.unitsPerMm * pad.scale; height: parent.height; color: "#ffffff"; opacity: 0.05 }
-          Rectangle { y: parent.height - height; width: parent.width; height: parent.height * shell.palmZone; color: shell.roleColor.palm; opacity: 0.10 }
+          // edge zones (scroll.edge_*_mm) and the palm zone at the back
+          readonly property real mmPx: shell.unitsPerMm * pad.scale
+          Rectangle { x: 0; width: shell.zones[0] * parent.mmPx; height: parent.height; color: "#ffffff"; opacity: 0.06 }
+          Rectangle { x: parent.width - width; width: shell.zones[1] * parent.mmPx; height: parent.height; color: "#ffffff"; opacity: 0.06 }
+          Rectangle { y: 0; width: parent.width; height: shell.zones[2] * parent.mmPx; color: "#ffffff"; opacity: 0.06 }
+          Rectangle { y: parent.height - height; width: parent.width; height: shell.zones[3] * parent.mmPx; color: shell.roleColor.palm; opacity: 0.10 }
           Text { anchors.top: parent.top; anchors.topMargin: 8; anchors.horizontalCenter: parent.horizontalCenter; text: "front"; color: shell.dim; font.family: shell.mono; font.pixelSize: 11 }
-          Text { visible: shell.palmZone > 0; anchors.bottom: parent.bottom; anchors.bottomMargin: 8; anchors.horizontalCenter: parent.horizontalCenter; text: "palm zone"; color: shell.roleColor.palm; font.family: shell.mono; font.pixelSize: 11 }
+          Text { visible: shell.zones[3] > 0; anchors.bottom: parent.bottom; anchors.bottomMargin: 8; anchors.horizontalCenter: parent.horizontalCenter; text: "palm"; color: shell.roleColor.palm; font.family: shell.mono; font.pixelSize: 11 }
 
           Repeater {
             model: shell.contacts

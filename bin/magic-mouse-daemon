@@ -65,7 +65,9 @@ SCROLL_VEL_MS = 60.0  # smoothing window for the wheel velocity momentum starts 
 # pushes the mouse a little. Measured on a Magic Mouse USB-C: scroll strokes
 # slide >= 4x (mostly >10x) farther than the mouse moves; resting fingers drift
 # < 2x the mouse's own travel.
-# The edge zone (a touch landing there holds the mouse) is scroll.edge_mm in the config.
+# Edge zones (a touch landing there holds the mouse) are scroll.edge_*_mm in the config.
+PAIR_MOVING_MM = 0.25  # a second finger moving this much within MOVE_WINDOW...
+PAIR_RATIO = 0.3  # ...and at least this share of the first finger's travel, the same way, joins it
 MOVE_WINDOW = 0.12  # seconds; "is this finger moving" looks this far back
 MOVING_MM = 0.5  # travel within MOVE_WINDOW that makes a finger moving rather than resting
 MIN_SLIDE_MM = 1.0  # while the mouse moves, a scroll needs this much slide within MOVE_WINDOW...
@@ -76,8 +78,14 @@ CLICK_QUIET = 0.25  # seconds around a press or release in which no scroll start
 # (MOUSE2 size 8) lists none. A 1–2 report tracking-id flicker or TOUCH_STATE_NONE
 # then looks like a lift unless we expire unmentioned slots and bridge a brief gap.
 BRIDGE_MS = 0.06
+# evdev drops unchanged values, so a resting or slow finger is often missing from a
+# touch report although it is still down (seen on the Magic Mouse 1). Such a slot is
+# only expired after this long without a mention, and comes back if it is mentioned
+# again without a new tracking id.
+STALE_SEC = 0.3
 # Free (diagonal) scrolling: the smaller axis is dropped while it is below this share of
 # the larger one, so a straight scroll does not wobble sideways.
+SURFACE_LENGTH_MM = (2047 + 1589) / TOUCH_UNITS_PER_MM  # front-to-back span of the touch surface
 FREE_MINOR = 0.35
 FREE_DIR_MS = 80.0  # smoothing window for the direction that decides which axes count
 
@@ -128,9 +136,12 @@ DEFAULTS = {
         "accel": 0.6,  # 0 = linear, 1 = strong ramp with finger speed
         "horizontal": True,
         "free_axis": False,  # diagonal scrolling: both axes at once instead of locking to one per scroll
-        "edge_mm": 6.0,  # a touch landing this close to the left or right edge counts as holding the mouse...
+        # A touch that lands this close to the left, right or front edge counts as holding the mouse...
+        "edge_left_mm": 3.0,
+        "edge_right_mm": 3.0,
+        "edge_front_mm": 0.0,
         "edge_release_mm": 2.0,  # ...until it slides this far (more than the mouse moves): then it may scroll
-        "palm_zone": 0.2,  # share of the surface at the back; touches that start there are ignored (0 = off)
+        "edge_back_mm": 18.0,  # touches that start this close to the back are the palm: always ignored (0 = off)
     },
     "buttons": {
         "middle": "left",  # a click in the centre zone: "left" (macOS has no middle click), "middle", or "right"
@@ -285,6 +296,15 @@ def load_config(path: str) -> dict:
         if sect not in cfg or not isinstance(vals, dict):
             log(f"config: unknown section [{sect}] ignored")
             continue
+        if sect == "scroll":
+            vals = dict(vals)
+            # earlier keys of this fork: one edge width for both sides, palm zone as a share
+            if "edge_mm" in vals:
+                old = vals.pop("edge_mm")
+                vals.setdefault("edge_left_mm", old)
+                vals.setdefault("edge_right_mm", old)
+            if "palm_zone" in vals:
+                vals.setdefault("edge_back_mm", float(vals.pop("palm_zone")) * SURFACE_LENGTH_MM)
         for k, v in vals.items():
             if k in cfg[sect]:
                 cfg[sect][k] = v
@@ -776,6 +796,8 @@ class Engine:
         self.cur_slot = 0
         self.mt_frame = False  # this SYN_REPORT included ABS_MT_* (a HID touch report)
         self.mt_seen: set[int] = set()  # slots mentioned in this touch report
+        self.slot_seen: dict[int, float] = {}  # slot -> last report that mentioned it
+        self.parked: dict[int, list] = {}  # slots expired for silence; restored if they speak again
         self.pending_lift: float | None = None  # apparent lift; end scroll if nothing returns within BRIDGE_MS
         self.touches: dict[int, Touch] = {}  # tracking_id -> Touch
         self.primary: tuple[int, ...] | None = None  # the finger (or two) being followed
@@ -829,6 +851,8 @@ class Engine:
 
     def reset_touch(self) -> None:
         self.slots.clear()
+        self.parked.clear()
+        self.slot_seen.clear()
         self.touches.clear()
         self.cur_slot = 0
         self.mt_frame = False
@@ -937,6 +961,10 @@ class Engine:
                 self.cur_slot = ev.value
             self.mt_seen.add(self.cur_slot)
             if ev.code != e.ABS_MT_SLOT:
+                if self.cur_slot not in self.slots and ev.code != e.ABS_MT_TRACKING_ID and self.cur_slot in self.parked:
+                    self.slots[self.cur_slot] = self.parked.pop(self.cur_slot)  # still the same finger
+                if ev.code == e.ABS_MT_TRACKING_ID:
+                    self.parked.pop(self.cur_slot, None)  # a new finger (or a lift) in this slot
                 slot = self.slots.setdefault(self.cur_slot, [-1, 0, 0, 0, 0])
                 if ev.code == e.ABS_MT_TRACKING_ID:
                     slot[0] = ev.value
@@ -969,7 +997,15 @@ class Engine:
         if self.mt_frame:
             # Motion-only packets (no ABS_MT) must not expire slots: those HID
             # reports simply omit touch data. A real touch report is the full set.
-            stale = [s for s in self.slots if s not in self.mt_seen or self.slots[s][0] < 0]
+            for s in self.mt_seen:
+                self.slot_seen[s] = ts
+                self.parked.pop(s, None)
+            lifted = [s for s in self.slots if self.slots[s][0] < 0]
+            silent = [s for s in self.slots if s not in self.mt_seen and s not in lifted
+                      and ts - self.slot_seen.get(s, ts) > STALE_SEC]
+            for s in silent:
+                self.parked[s] = self.slots[s]
+            stale = lifted + silent
             if stale and self.verbose:
                 log(f"touch: drop slots {stale}")
             for s in stale:
@@ -1037,8 +1073,7 @@ class Engine:
             "coast": self.coasting,
             "moving": self.moving_now(ts),
             "why": self.why,
-            "edge_mm": float(self.cfg["scroll"]["edge_mm"]),
-            "palm": float(self.cfg["scroll"]["palm_zone"]),
+            "zones": [float(self.cfg["scroll"][k]) for k in ("edge_left_mm", "edge_right_mm", "edge_front_mm", "edge_back_mm")],
         })
 
     def pointer(self, ts: float, dx: int, dy: int) -> None:
@@ -1140,13 +1175,17 @@ class Engine:
             if not gone.grip:
                 self.lost = (ts, gone.x, gone.y)
         sc = self.cfg["scroll"]
-        edge = max(float(sc["edge_mm"]), 0.0) * self.res_x
-        palm_from = self.y_max - max(min(float(sc["palm_zone"]), 0.9), 0.0) * (self.y_max - self.y_min)
+        mm = lambda key: max(float(sc[key]), 0.0)
+        left_to = self.x_min + mm("edge_left_mm") * self.res_x
+        right_from = self.x_max - mm("edge_right_mm") * self.res_x
+        front_to = self.y_min + mm("edge_front_mm") * self.res_y
+        palm_from = self.y_max - mm("edge_back_mm") * self.res_y
         for tid, (x, y) in live.items():
             t = self.touches.get(tid)
             if t is None:
-                grip = x <= self.x_min + edge or x >= self.x_max - edge
-                palm = float(sc["palm_zone"]) > 0 and y >= palm_from
+                grip = (mm("edge_left_mm") > 0 and x <= left_to) or (mm("edge_right_mm") > 0 and x >= right_from) \
+                    or (mm("edge_front_mm") > 0 and y <= front_to)
+                palm = mm("edge_back_mm") > 0 and y >= palm_from
                 if (grip or palm) and self.lost and ts - self.lost[0] < BRIDGE_MS \
                         and math.hypot(x - self.lost[1], y - self.lost[2]) / self.res_x < 5.0:
                     grip = palm = False  # a tracking-id flicker of a scrolling finger, not a new grip
@@ -1225,6 +1264,15 @@ class Engine:
             return bool(key) and all(t in self.touches for t in key)
 
         if self.scrolling and down(self.primary):
+            if len(self.primary) == 1 and len(fingers) >= 2:
+                pair = self.partner(fingers, self.primary[0])
+                if pair:
+                    if self.axis == "x" and self.scroll_ts_age() < 0.25:
+                        # a sideways scroll that turns out to be two fingers: it is the
+                        # workspace swipe, not a horizontal scroll
+                        self.scrolling = False
+                        self.why = "second finger joined: two-finger swipe"
+                    return pair
             return self.primary
         if self.scrolling and len(fingers) == 1:
             return (fingers[0],)  # tracking id changed; keep the remaining finger
@@ -1235,13 +1283,33 @@ class Engine:
         if m1 < MOVING_MM:
             self.why = "all fingers resting"
             return self.primary if down(self.primary) else None
+        pair = self.partner(fingers, t1)
+        if pair:
+            return pair  # two fingers moving together
         if m2 >= MOVING_MM and m2 >= 0.5 * m1:
-            (ax, ay), (bx, by) = self.touches[t1].recent(), self.touches[t2].recent()
-            if ax * bx + ay * by > 0:
-                return tuple(sorted((t1, t2)))  # two fingers moving together
             self.why = "two fingers moving apart (pinch)"
-            return None  # moving apart: a pinch, not a scroll
+            return None  # clearly moving apart: a pinch, not a scroll
         return (t1,)
+
+    def partner(self, fingers: list[int], t1: int) -> tuple[int, ...] | None:
+        """The finger moving along with t1, if any, as a sorted pair."""
+        ax, ay = self.touches[t1].recent()
+        m1 = math.hypot(ax, ay) / self.res_x
+        best = None
+        for t in fingers:
+            if t == t1:
+                continue
+            bx, by = self.touches[t].recent()
+            m = math.hypot(bx, by) / self.res_x
+            if m >= PAIR_MOVING_MM and m >= PAIR_RATIO * m1 and ax * bx + ay * by > 0:
+                if best is None or m > best[0]:
+                    best = (m, t)
+        return tuple(sorted((t1, best[1]))) if best else None
+
+    def scroll_ts_age(self) -> float:
+        """Seconds since the current scroll started (by the last touch timestamp)."""
+        newest = max((t.hist[-1][0] for t in self.touches.values()), default=self.scroll_t0)
+        return newest - self.scroll_t0
 
     def key_recent_mm(self, key: tuple[int, ...]) -> float:
         vx = sum(self.touches[t].recent()[0] for t in key) / len(key) / self.res_x

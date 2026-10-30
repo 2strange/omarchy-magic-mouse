@@ -26,11 +26,13 @@ Panel {
     openedFromHotkey = false
     setCenterHoverRevealSuppressed(false)
     root.controller.show()
+    root.snapshotPending = true
     root.refresh()
   }
   function openFromHotkey() {
     openedFromHotkey = true
     root.controller.show()
+    root.snapshotPending = true
     root.refresh()
     Qt.callLater(function() { if (root.opened) setCenterHoverRevealSuppressed(true) })
   }
@@ -63,6 +65,7 @@ Panel {
 
   // ---- config state
   property var cfg: null
+  property bool snapshotPending: false
   function val(section, key, fallback) {
     if (!cfg || !cfg[section] || cfg[section][key] === undefined) return fallback
     return cfg[section][key]
@@ -77,6 +80,10 @@ Panel {
     stdout: StdioCollector {
       onStreamFinished: {
         try { root.cfg = JSON.parse(text) } catch (e) { console.warn("magic-mouse: bad config json", e) }
+        if (root.snapshotPending && root.cfg) {
+          root.openedCfg = JSON.parse(JSON.stringify(root.cfg))
+          root.snapshotPending = false
+        }
       }
     }
   }
@@ -127,6 +134,53 @@ Panel {
   readonly property string fontFam: bar ? bar.fontFamily : Style.font.family
 
   function fmt1(v) { return (Math.round(v * 100) / 100).toString() }
+  function mmText(v) { return v <= 0 ? "off" : fmt1(v) + " mm" }
+
+  // ---- undo / defaults
+  // The keys each tab shows; "Defaults" resets the open tab, "Undo" restores every
+  // key to what it was when the menu opened.
+  readonly property var tabKeys: ({
+    point: ["pointer.tracking_speed", "buttons.right_click", "buttons.control_click", "bar.show_percent"],
+    scroll: ["scroll.natural", "scroll.speed", "scroll.start_mm", "scroll.free_axis", "momentum.enabled", "momentum.decay"],
+    gestures: ["gestures.swipe_pages", "gestures.two_finger_swipe_left", "gestures.two_finger_swipe_right", "gestures.invert_swipe"],
+    touch: ["scroll.edge_left_mm", "scroll.edge_right_mm", "scroll.edge_front_mm", "scroll.edge_back_mm"]
+  })
+  property var defaults: null
+  property var openedCfg: null  // snapshot when the menu opened, for Undo
+  function keyVal(src, path) {
+    var p = path.split(".")
+    return src && src[p[0]] ? src[p[0]][p[1]] : undefined
+  }
+  function applyFrom(src, keys) {
+    for (var i = 0; i < keys.length; i++) {
+      var v = keyVal(src, keys[i])
+      if (v === undefined || v === keyVal(cfg, keys[i])) continue
+      var p = keys[i].split(".")
+      set(p[0], p[1], v)
+    }
+  }
+  function resetTab() { if (defaults) applyFrom(defaults, tabKeys[tab]) }
+  function undoAll() {
+    if (!openedCfg) return
+    var all = []
+    for (var t in tabKeys) all = all.concat(tabKeys[t])
+    applyFrom(openedCfg, all)
+  }
+  readonly property bool changed: {
+    if (!openedCfg || !cfg) return false
+    for (var t in tabKeys)
+      for (var i = 0; i < tabKeys[t].length; i++)
+        if (keyVal(openedCfg, tabKeys[t][i]) !== keyVal(cfg, tabKeys[t][i])) return true
+    return false
+  }
+  Process {
+    id: defaultsProc
+    command: ["magic-mouse-config", "defaults"]
+    running: true
+    stdout: StdioCollector {
+      onStreamFinished: { try { root.defaults = JSON.parse(text) } catch (e) { console.warn("magic-mouse: bad defaults json", e) } }
+    }
+  }
 
   // ---- a labelled slider row
   component SliderRow: Column {
@@ -152,6 +206,7 @@ Panel {
       return Math.round(s * 10000) / 10000
     }
     PanelSlider {
+      id: slider
       bar: root.bar
       width: parent.width
       minimum: row.minimum
@@ -160,6 +215,13 @@ Panel {
       value: row.value
       onMoved: function(v) { row.changed(row.snap(v)) }
       onReleased: function(v) { row.changed(row.snap(v)) }
+      // The Magic Mouse scrolls at the lightest touch; a slider that follows the
+      // wheel would change while you only move over it. Drag or click only.
+      MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.NoButton
+        onWheel: function(wheel) { wheel.accepted = true }
+      }
     }
   }
 
@@ -408,19 +470,38 @@ Panel {
               }
             }
           }
-          SliderRow {
-            label: "Edge zone (holding the mouse)"
-            valueText: root.val("scroll", "edge_mm", 6.0) <= 0 ? "off" : root.fmt1(root.val("scroll", "edge_mm", 6.0)) + " mm"
-            minimum: 0; maximum: 10; step: 0.5
-            value: root.val("scroll", "edge_mm", 6.0)
-            onChanged: function(v) { root.set("scroll", "edge_mm", Math.round(v * 10) / 10) }
+          Text {
+            width: parent.width
+            text: "A touch that starts in an edge zone counts as holding the mouse until it really slides. The back zone is the palm and is always ignored."
+            color: root.dim; font.family: root.fontFam; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
           }
           SliderRow {
-            label: "Ignore touches starting at the back (palm)"
-            valueText: root.val("scroll", "palm_zone", 0.2) <= 0 ? "off" : Math.round(root.val("scroll", "palm_zone", 0.2) * 100) + " %"
-            minimum: 0; maximum: 0.4; step: 0.05
-            value: root.val("scroll", "palm_zone", 0.2)
-            onChanged: function(v) { root.set("scroll", "palm_zone", Math.round(v * 100) / 100) }
+            label: "Left edge"
+            valueText: root.mmText(root.val("scroll", "edge_left_mm", 3.0))
+            minimum: 0; maximum: 15; step: 0.5
+            value: root.val("scroll", "edge_left_mm", 3.0)
+            onChanged: function(v) { root.set("scroll", "edge_left_mm", v) }
+          }
+          SliderRow {
+            label: "Right edge"
+            valueText: root.mmText(root.val("scroll", "edge_right_mm", 3.0))
+            minimum: 0; maximum: 15; step: 0.5
+            value: root.val("scroll", "edge_right_mm", 3.0)
+            onChanged: function(v) { root.set("scroll", "edge_right_mm", v) }
+          }
+          SliderRow {
+            label: "Front edge"
+            valueText: root.mmText(root.val("scroll", "edge_front_mm", 0.0))
+            minimum: 0; maximum: 15; step: 0.5
+            value: root.val("scroll", "edge_front_mm", 0.0)
+            onChanged: function(v) { root.set("scroll", "edge_front_mm", v) }
+          }
+          SliderRow {
+            label: "Back (palm, ignored)"
+            valueText: root.mmText(root.val("scroll", "edge_back_mm", 18.0))
+            minimum: 0; maximum: 40; step: 1
+            value: root.val("scroll", "edge_back_mm", 18.0)
+            onChanged: function(v) { root.set("scroll", "edge_back_mm", v) }
           }
 
           Text {
@@ -430,6 +511,36 @@ Panel {
             font.family: root.fontFam
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
+          }
+        }
+
+        PanelSeparator { width: parent.width; foreground: root.fg }
+        Item {
+          width: parent.width
+          implicitHeight: undoButton.implicitHeight
+          Button {
+            id: undoButton
+            anchors.left: parent.left
+            text: "Undo changes"
+            tooltipText: "Put every setting back to how it was when this menu opened"
+            bordered: true
+            enabled: root.changed
+            opacity: enabled ? 1 : 0.4
+            foreground: root.fg
+            fontFamily: root.fontFam
+            fontSize: Style.font.caption
+            onClicked: root.undoAll()
+          }
+          Button {
+            anchors.right: parent.right
+            text: "Defaults"
+            tooltipText: "Reset the settings on this tab to the built-in defaults"
+            bordered: true
+            enabled: root.defaults !== null
+            foreground: root.fg
+            fontFamily: root.fontFam
+            fontSize: Style.font.caption
+            onClicked: root.resetTab()
           }
         }
       }

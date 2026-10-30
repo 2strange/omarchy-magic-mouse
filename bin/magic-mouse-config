@@ -5,6 +5,7 @@ File access goes through the daemon's read_own_file / write_own_file (no symlink
 following, no blocking on FIFOs, owner/type/size checks, random O_EXCL temp + rename).
 
   magic-mouse-config get                       # effective config as JSON (defaults merged)
+  magic-mouse-config defaults                  # built-in defaults as JSON
   magic-mouse-config set pointer.tracking_speed=1.0 scroll.natural=true
 """
 import errno, json, os, re, stat, sys
@@ -80,6 +81,9 @@ def main(argv: list[str]) -> int:
     if len(argv) >= 1 and argv[0] == "get":
         mod = daemon_module()
         print(json.dumps(mod["load_config"](CONFIG)))
+        return 0
+    if len(argv) == 1 and argv[0] == "defaults":
+        print(json.dumps(daemon_module()["DEFAULTS"]))
         return 0
     if len(argv) >= 2 and argv[0] == "set":
         pairs = []
