@@ -89,11 +89,12 @@ def EVIOCGMTSLOTS(length: int) -> int:
 class Touch:
     """One finger on the surface, from landing to lift."""
 
-    __slots__ = ("x", "y", "x0", "y0", "grip", "palm", "hist")
+    __slots__ = ("x", "y", "x0", "y0", "ptr0", "grip", "palm", "hist")
 
     def __init__(self, ts: float, x: int, y: int, grip: bool, palm: bool = False) -> None:
         self.x, self.y, self.grip, self.palm = x, y, grip or palm, palm
         self.x0, self.y0 = x, y
+        self.ptr0 = 0.0  # Engine.ptr_total when the finger landed
         self.hist: collections.deque = collections.deque([(ts, x, y)])
 
     def update(self, ts: float, x: int, y: int) -> None:
@@ -767,7 +768,9 @@ class Engine:
         self.rem_y = 0.0
         self.hold_until = 0.0
         self.hold_acc = [0.0, 0.0]
-        self.recent: collections.deque = collections.deque()  # (ts, raw distance): how much the mouse itself moved lately
+        self.recent: collections.deque = collections.deque()
+        self.ptr_total = 0.0  # raw counts the mouse moved since start (edge release compares against it)
+        self.lost: tuple[float, int, int] | None = None  # (ts, x, y) of the last non-grip finger that vanished  # (ts, raw distance): how much the mouse itself moved lately
         # touch
         self.slots: dict[int, list] = {}  # slot -> [tracking_id, x, y, touch_major, touch_minor]
         self.cur_slot = 0
@@ -779,6 +782,8 @@ class Engine:
         self.t_ref: tuple[int, int] | None = None
         self.scrolling = False
         self.axis = "y"
+        self.start_axis = "y"  # axis the scroll started on (free_axis keeps page swipes working)
+        self.s_travel_x = 0.0  # signed sideways travel this scroll (mm)
         self.s_rem = {"x": 0.0, "y": 0.0}
         self.s_notch = {"x": 0, "y": 0}
         self.s_vel = 0.0
@@ -1045,6 +1050,7 @@ class Engine:
         self.last_motion_t = ts
         dist = math.hypot(dx, dy)
         self.recent.append((ts, dist))
+        self.ptr_total += dist
         keep = max(float(self.cfg["scroll"]["settle_ms"]) / 1000.0, MOVE_WINDOW)
         while self.recent and self.recent[0][0] < ts - keep:
             self.recent.popleft()
@@ -1130,7 +1136,9 @@ class Engine:
     def touch(self, ts: float) -> None:
         live = {v[0]: (v[1], v[2]) for v in self.slots.values() if v[0] >= 0}
         for tid in [t for t in self.touches if t not in live]:
-            del self.touches[tid]
+            gone = self.touches.pop(tid)
+            if not gone.grip:
+                self.lost = (ts, gone.x, gone.y)
         sc = self.cfg["scroll"]
         edge = max(float(sc["edge_mm"]), 0.0) * self.res_x
         palm_from = self.y_max - max(min(float(sc["palm_zone"]), 0.9), 0.0) * (self.y_max - self.y_min)
@@ -1139,7 +1147,11 @@ class Engine:
             if t is None:
                 grip = x <= self.x_min + edge or x >= self.x_max - edge
                 palm = float(sc["palm_zone"]) > 0 and y >= palm_from
+                if (grip or palm) and self.lost and ts - self.lost[0] < BRIDGE_MS \
+                        and math.hypot(x - self.lost[1], y - self.lost[2]) / self.res_x < 5.0:
+                    grip = palm = False  # a tracking-id flicker of a scrolling finger, not a new grip
                 self.touches[tid] = Touch(ts, x, y, grip, palm)
+                self.touches[tid].ptr0 = self.ptr_total
                 if not (grip or palm):
                     self.stop_coast("touch")
             else:
@@ -1199,11 +1211,12 @@ class Engine:
         """A finger that landed in the edge zone slides on the surface (not just with the hand)."""
         sc = self.cfg["scroll"]
         travel = math.hypot(t.x - t.x0, t.y - t.y0) / self.res_x
-        if travel < float(sc["edge_release_mm"]):
-            return False
+        hand_mm = (self.ptr_total - t.ptr0) * 25.4 / max(float(self.cfg["pointer"]["cpi"]), 1.0)
+        if travel < float(sc["edge_release_mm"]) + POINTER_RATIO * hand_mm:
+            return False  # drift, or the finger just rides along while the hand moves the mouse
         rx, ry = t.recent()
         slide = math.hypot(rx, ry) / self.res_x
-        return slide >= MOVING_MM and slide > POINTER_RATIO * self.pointer_mm(ts, MOVE_WINDOW)
+        return slide >= MIN_SLIDE_MM and slide > POINTER_RATIO * self.pointer_mm(ts, MOVE_WINDOW)
 
     def pick(self, fingers: list[int]) -> tuple[int, ...] | None:
         """The finger(s) to follow: a scroll in progress keeps its own; otherwise the
@@ -1246,8 +1259,8 @@ class Engine:
         dx_mm = (cx - self.two_ref[0]) / self.res_x
         dy_mm = (cy - self.two_ref[1]) / self.res_y
         self.session_travel = max(self.session_travel, math.hypot(dx_mm, dy_mm))
-        if self.gesture_fired:
-            return
+        if self.gesture_fired or self.scrolling:
+            return  # a two-finger scroll that drifts sideways is not a workspace swipe
         if abs(dx_mm) >= float(g["swipe_mm"]) and abs(dx_mm) > HORIZONTAL_RATIO * abs(dy_mm):
             self.gesture_fired = True
             left = dx_mm < 0
@@ -1310,12 +1323,14 @@ class Engine:
                     self.why = "sideways with two fingers (gesture)" if len(key) == 2 else "horizontal scroll off"
                 self.t_ref = (x, y)  # sideways with two fingers is the workspace gesture
                 return
+            self.start_axis = self.axis
             if s["free_axis"] and s["horizontal"]:
                 self.axis = "xy"
             self.scrolling = True
             self.session_scrolled = True
             self.scroll_t0 = ts
             self.s_travel = 0.0
+            self.s_travel_x = 0.0
             self.t_ref = (x, y)  # the start travel is swallowed, like macOS
             self.s_vel = 0.0
             self.s_speed = 0.0
@@ -1353,6 +1368,7 @@ class Engine:
             if abs(self.s_dir[1]) < FREE_MINOR * big:
                 dy_mm = 0.0
             d_mm = math.hypot(dx_mm, dy_mm)
+            self.s_travel_x += dx_mm
         else:
             d_mm = dy_mm if self.axis == "y" else dx_mm
         self.s_travel += d_mm
@@ -1407,13 +1423,14 @@ class Engine:
         fade = math.exp(-max(ts - self.s_last_t - NOMINAL_DT, 0.0) * 1000.0 / SCROLL_VEL_MS)
         self.s_vel *= fade
         self.s_vel_xy = [v * fade for v in self.s_vel_xy]
+        sideways = self.s_travel_x if self.axis == "xy" else self.s_travel
         swipe = (
-            self.axis == "x" and g["swipe_pages"]
-            and (ts - self.scroll_t0) < 0.4 and abs(self.s_travel) >= float(g["swipe_mm"])
+            (self.axis == "x" or (self.axis == "xy" and self.start_axis == "x")) and g["swipe_pages"]
+            and (ts - self.scroll_t0) < 0.4 and abs(sideways) >= float(g["swipe_mm"])
         )
         if swipe:
-            self.nav(back=self.s_travel > 0)  # finger moving right = back, like macOS
-        elif m["enabled"] and abs(self.s_vel) >= float(m["flick"]):
+            self.nav(back=sideways > 0)  # finger moving right = back, like macOS
+        elif m["enabled"] and self.s_vel != 0.0 and abs(self.s_vel) >= float(m["flick"]):
             self.coasting = True
             self.c_vel = self.s_vel
             if self.axis == "xy":
