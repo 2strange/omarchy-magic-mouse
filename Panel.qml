@@ -80,7 +80,8 @@ Panel {
     stdout: StdioCollector {
       onStreamFinished: {
         try { root.cfg = JSON.parse(text) } catch (e) { console.warn("magic-mouse: bad config json", e) }
-        if (root.snapshotPending && root.cfg) {
+        // Snapshot for Undo only from a file with no write in flight, or it would be stale.
+        if (root.snapshotPending && root.cfg && !writeTimer.running && !writeProc.running) {
           root.openedCfg = JSON.parse(JSON.stringify(root.cfg))
           root.snapshotPending = false
         }
@@ -118,7 +119,10 @@ Panel {
   }
   Process {
     id: writeProc
-    onExited: function(code) { if (code !== 0) console.warn("magic-mouse-config failed", code) }
+    onExited: function(code) {
+      if (code !== 0) console.warn("magic-mouse-config failed", code)
+      if (root.snapshotPending) root.refresh()
+    }
   }
 
   FileView {

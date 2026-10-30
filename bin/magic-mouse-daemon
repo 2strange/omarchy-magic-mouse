@@ -83,6 +83,7 @@ BRIDGE_MS = 0.06
 # only expired after this long without a mention, and comes back if it is mentioned
 # again without a new tracking id.
 STALE_SEC = 0.3
+JUMP_MM = 5.0  # a slot moving this far in one report without a new tracking id is a new finger
 # Free (diagonal) scrolling: the smaller axis is dropped while it is below this share of
 # the larger one, so a straight scroll does not wobble sideways.
 SURFACE_LENGTH_MM = (2047 + 1589) / TOUCH_UNITS_PER_MM  # front-to-back span of the touch surface
@@ -798,6 +799,7 @@ class Engine:
         self.mt_seen: set[int] = set()  # slots mentioned in this touch report
         self.slot_seen: dict[int, float] = {}  # slot -> last report that mentioned it
         self.parked: dict[int, list] = {}  # slots expired for silence; restored if they speak again
+        self.parked_touch: dict[int, Touch] = {}  # their Touch objects, so a restore is not a new landing
         self.pending_lift: float | None = None  # apparent lift; end scroll if nothing returns within BRIDGE_MS
         self.touches: dict[int, Touch] = {}  # tracking_id -> Touch
         self.primary: tuple[int, ...] | None = None  # the finger (or two) being followed
@@ -852,6 +854,7 @@ class Engine:
     def reset_touch(self) -> None:
         self.slots.clear()
         self.parked.clear()
+        self.parked_touch.clear()
         self.slot_seen.clear()
         self.touches.clear()
         self.cur_slot = 0
@@ -885,6 +888,9 @@ class Engine:
         except OSError as exc:
             log(f"touch state: {exc}")
             return
+        self.parked.clear()
+        self.parked_touch.clear()
+        self.slot_seen.clear()
         self.slots = {
             i: [cols[e.ABS_MT_TRACKING_ID][i], cols[e.ABS_MT_POSITION_X][i], cols[e.ABS_MT_POSITION_Y][i],
                 cols[e.ABS_MT_TOUCH_MAJOR][i], cols[e.ABS_MT_TOUCH_MINOR][i]]
@@ -964,7 +970,9 @@ class Engine:
                 if self.cur_slot not in self.slots and ev.code != e.ABS_MT_TRACKING_ID and self.cur_slot in self.parked:
                     self.slots[self.cur_slot] = self.parked.pop(self.cur_slot)  # still the same finger
                 if ev.code == e.ABS_MT_TRACKING_ID:
-                    self.parked.pop(self.cur_slot, None)  # a new finger (or a lift) in this slot
+                    old = self.parked.pop(self.cur_slot, None)  # a new finger (or a lift) in this slot
+                    if old:
+                        self.parked_touch.pop(old[0], None)
                 slot = self.slots.setdefault(self.cur_slot, [-1, 0, 0, 0, 0])
                 if ev.code == e.ABS_MT_TRACKING_ID:
                     slot[0] = ev.value
@@ -994,22 +1002,22 @@ class Engine:
 
     # ---- per-frame processing
     def process_frame(self, ts: float) -> None:
-        if self.mt_frame:
-            # Motion-only packets (no ABS_MT) must not expire slots: those HID
-            # reports simply omit touch data. A real touch report is the full set.
-            for s in self.mt_seen:
-                self.slot_seen[s] = ts
-                self.parked.pop(s, None)
-            lifted = [s for s in self.slots if self.slots[s][0] < 0]
-            silent = [s for s in self.slots if s not in self.mt_seen and s not in lifted
-                      and ts - self.slot_seen.get(s, ts) > STALE_SEC]
-            for s in silent:
-                self.parked[s] = self.slots[s]
-            stale = lifted + silent
-            if stale and self.verbose:
-                log(f"touch: drop slots {stale}")
-            for s in stale:
-                del self.slots[s]
+        # A slot not mentioned for STALE_SEC (in touch reports or motion-only ones,
+        # which carry no touch data) is parked; it comes back with its Touch if it
+        # speaks again without a new tracking id. A lift (-1) ends it at once.
+        for s in self.mt_seen:
+            self.slot_seen[s] = ts
+        lifted = [s for s in self.slots if self.slots[s][0] < 0]
+        silent = [s for s in self.slots if s not in self.mt_seen and s not in lifted
+                  and ts - self.slot_seen.setdefault(s, ts) > STALE_SEC]
+        for s in silent:
+            self.parked[s] = self.slots[s]
+        stale = lifted + silent
+        if stale and self.verbose:
+            log(f"touch: drop slots {stale}")
+        for s in stale:
+            del self.slots[s]
+            self.slot_seen.pop(s, None)
         self.mt_frame = False
         self.mt_seen.clear()
 
@@ -1170,10 +1178,16 @@ class Engine:
 
     def touch(self, ts: float) -> None:
         live = {v[0]: (v[1], v[2]) for v in self.slots.values() if v[0] >= 0}
+        parked_ids = {v[0] for v in self.parked.values()}
         for tid in [t for t in self.touches if t not in live]:
             gone = self.touches.pop(tid)
+            if tid in parked_ids:
+                self.parked_touch[tid] = gone  # silent, not lifted: keep it for a restore
+                continue
             if not gone.grip:
                 self.lost = (ts, gone.x, gone.y)
+        for tid in [t for t in self.parked_touch if t not in parked_ids and t not in live]:
+            del self.parked_touch[tid]
         sc = self.cfg["scroll"]
         mm = lambda key: max(float(sc[key]), 0.0)
         left_to = self.x_min + mm("edge_left_mm") * self.res_x
@@ -1182,6 +1196,13 @@ class Engine:
         palm_from = self.y_max - mm("edge_back_mm") * self.res_y
         for tid, (x, y) in live.items():
             t = self.touches.get(tid)
+            if t is None and tid in self.parked_touch:
+                t = self.touches[tid] = self.parked_touch.pop(tid)  # the same finger, speaking again
+            elif t is not None and math.hypot(x - t.x, y - t.y) / self.res_x > JUMP_MM:
+                del self.touches[tid]  # a new finger reusing the slot and the id: a new landing
+                if tid in (self.primary or ()):
+                    self.t_ref = None
+                t = None
             if t is None:
                 grip = (mm("edge_left_mm") > 0 and x <= left_to) or (mm("edge_right_mm") > 0 and x >= right_from) \
                     or (mm("edge_front_mm") > 0 and y <= front_to)
@@ -1232,7 +1253,7 @@ class Engine:
             self.primary = None
             self.stop_coast("touch")
         self.max_fingers = max(self.max_fingers, len(fingers))
-        key = self.pick(fingers)
+        key = self.pick(fingers, ts)
         if key is None:
             if self.scrolling:
                 self.why = "scroll end: " + self.why
@@ -1257,7 +1278,7 @@ class Engine:
         slide = math.hypot(rx, ry) / self.res_x
         return slide >= MIN_SLIDE_MM and slide > POINTER_RATIO * self.pointer_mm(ts, MOVE_WINDOW)
 
-    def pick(self, fingers: list[int]) -> tuple[int, ...] | None:
+    def pick(self, fingers: list[int], ts: float) -> tuple[int, ...] | None:
         """The finger(s) to follow: a scroll in progress keeps its own; otherwise the
         one that moves while the others rest, or two moving the same way."""
         def down(key: tuple[int, ...] | None) -> bool:
@@ -1267,12 +1288,19 @@ class Engine:
             if len(self.primary) == 1 and len(fingers) >= 2:
                 pair = self.partner(fingers, self.primary[0])
                 if pair:
-                    if self.axis == "x" and self.scroll_ts_age() < 0.25:
-                        # a sideways scroll that turns out to be two fingers: it is the
-                        # workspace swipe, not a horizontal scroll
+                    sideways = self.s_travel_x if self.axis == "xy" else self.s_travel
+                    if (self.start_axis == "x" and ts - self.scroll_t0 < 0.25
+                            and abs(sideways) < float(self.cfg["gestures"]["swipe_mm"])):
+                        # a young sideways scroll that turns out to be two fingers is the
+                        # workspace swipe, not a horizontal scroll (a finished page flick is kept)
                         self.scrolling = False
+                        self.two_key = None
                         self.why = "second finger joined: two-finger swipe"
                     return pair
+            if len(self.primary) == 2:
+                (ma, a), (mb, b) = sorted(((math.hypot(*self.touches[t].recent()) / self.res_x, t) for t in self.primary), reverse=True)
+                if mb < PAIR_MOVING_MM / 2 and ma >= MOVING_MM:
+                    return (a,)  # the partner came to rest: follow the finger that still moves
             return self.primary
         if self.scrolling and len(fingers) == 1:
             return (fingers[0],)  # tracking id changed; keep the remaining finger
@@ -1305,11 +1333,6 @@ class Engine:
                 if best is None or m > best[0]:
                     best = (m, t)
         return tuple(sorted((t1, best[1]))) if best else None
-
-    def scroll_ts_age(self) -> float:
-        """Seconds since the current scroll started (by the last touch timestamp)."""
-        newest = max((t.hist[-1][0] for t in self.touches.values()), default=self.scroll_t0)
-        return newest - self.scroll_t0
 
     def key_recent_mm(self, key: tuple[int, ...]) -> float:
         vx = sum(self.touches[t].recent()[0] for t in key) / len(key) / self.res_x

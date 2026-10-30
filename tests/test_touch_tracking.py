@@ -1,0 +1,130 @@
+"""Touch tracking in the daemon's Engine, driven by synthetic evdev frames:
+silent slots, ghost slots, restores, slot reuse and two-finger pairing.
+Needs python-evdev, like the daemon itself.
+
+Run from the repo root:  python3 -m unittest discover -s tests -v
+"""
+import importlib.machinery
+import importlib.util
+import os
+import types
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DAEMON = os.path.join(ROOT, "bin", "magic-mouse-daemon")
+
+try:
+    loader = importlib.machinery.SourceFileLoader("magic_mouse_daemon_touch", DAEMON)
+    spec = importlib.util.spec_from_loader("magic_mouse_daemon_touch", loader)
+    daemon = importlib.util.module_from_spec(spec)
+    loader.exec_module(daemon)
+    SKIP = None
+except ImportError as exc:  # python-evdev missing
+    daemon = None
+    SKIP = f"cannot import the daemon: {exc}"
+
+SLOT, TID, X, Y, MAJOR = 47, 57, 53, 54, 48  # ABS_MT_* codes
+
+
+class FakeUI:
+    def __init__(self):
+        self.wheel = {"x": 0, "y": 0}
+
+    def write(self, typ, code, value):
+        e = daemon.e
+        if typ == e.EV_REL and code == e.REL_WHEEL_HI_RES:
+            self.wheel["y"] += value
+        elif typ == e.EV_REL and code == e.REL_HWHEEL_HI_RES:
+            self.wheel["x"] += value
+
+    def syn(self):
+        pass
+
+
+@unittest.skipIf(SKIP, SKIP)
+class TouchTracking(unittest.TestCase):
+    def setUp(self):
+        daemon.log = lambda msg: None
+        self.actions = []
+        daemon.run_action = lambda cmd: self.actions.append(cmd)
+        self.cfg = {k: dict(v) for k, v in daemon.DEFAULTS.items()}
+        self.ui = FakeUI()
+        self.eng = daemon.Engine(self.cfg, self.ui, False)
+        self.t = 100.0
+
+    def frame(self, *events):
+        """One input report: (code, value) ABS_MT events, then SYN_REPORT."""
+        for code, value in events:
+            self.eng.feed(types.SimpleNamespace(type=3, code=code, value=value, timestamp=lambda t=self.t: t))
+        self.eng.feed(types.SimpleNamespace(type=0, code=0, value=0, timestamp=lambda t=self.t: t))
+        if self.eng.coasting:
+            self.eng.tick(self.t)
+        self.t += 0.011
+
+    def idle(self, n):
+        for _ in range(n):
+            self.frame()
+
+    def test_ghost_slot_from_sync_expires(self):
+        # a slot loaded by sync_mt that the kernel never mentions again
+        self.eng.slots = {5: [900, 0, 600, 400, 300]}
+        self.idle(int(daemon.STALE_SEC / 0.011) + 5)
+        self.assertNotIn(5, self.eng.slots)
+
+    def test_silent_resting_finger_is_kept_then_restored_as_same_touch(self):
+        self.frame((SLOT, 1), (TID, 7), (X, 400), (Y, 200), (MAJOR, 600))
+        self.idle(5)  # silent, but within STALE_SEC
+        self.assertIn(7, self.eng.touches)
+        self.idle(int(daemon.STALE_SEC / 0.011) + 5)  # now parked
+        self.assertNotIn(7, self.eng.touches)
+        before = self.eng.parked_touch[7]
+        self.frame((SLOT, 1), (X, 404))  # speaks again, no new tracking id
+        self.assertIs(self.eng.touches.get(7), before)
+
+    def test_restore_does_not_stop_a_glide(self):
+        self.frame((SLOT, 1), (TID, 7), (X, 400), (Y, 1500), (MAJOR, 600))  # resting finger
+        self.frame((SLOT, 0), (TID, 8), (X, 0), (Y, 1200), (MAJOR, 600))
+        for i in range(25):  # fast scroll with the other finger
+            self.frame((SLOT, 0), (Y, 1200 - 60 * i))
+        self.frame((SLOT, 0), (TID, -1))
+        self.idle(int(daemon.BRIDGE_MS / 0.011) + 2)  # the glide starts once the lift is confirmed
+        self.assertTrue(self.eng.coasting)
+        self.idle(int(daemon.STALE_SEC / 0.011) - 6)  # resting finger gets parked (still gliding)
+        self.assertNotIn(7, self.eng.touches)
+        self.assertTrue(self.eng.coasting)
+        self.frame((SLOT, 1), (X, 402))  # and twitches
+        self.assertTrue(self.eng.coasting)
+
+    def test_lift_is_never_restored(self):
+        self.frame((SLOT, 1), (TID, 7), (X, 400), (Y, 200))
+        self.idle(int(daemon.STALE_SEC / 0.011) + 5)
+        self.frame((SLOT, 1), (TID, -1))
+        self.frame((SLOT, 1), (X, 410))  # stray position without an id
+        self.assertNotIn(7, self.eng.touches)
+
+    def test_jump_without_new_id_is_a_new_landing(self):
+        self.frame((SLOT, 0), (TID, 9), (X, 0), (Y, 0))
+        first = self.eng.touches[9]
+        self.frame((SLOT, 0), (X, int(daemon.JUMP_MM * 1.5 * daemon.TOUCH_UNITS_PER_MM)))
+        self.assertIsNot(self.eng.touches[9], first)
+
+    def test_two_fingers_moving_together_are_followed_as_a_pair(self):
+        self.frame((SLOT, 0), (TID, 1), (X, -300), (Y, 400), (MAJOR, 600),
+                   (SLOT, 1), (TID, 2), (X, 300), (Y, 450), (MAJOR, 600))
+        for i in range(1, 30):  # both slide backwards, the second a bit slower
+            self.frame((SLOT, 0), (Y, 400 + 30 * i), (SLOT, 1), (Y, 450 + 18 * i))
+        self.assertEqual(self.eng.primary, (1, 2))
+        self.assertTrue(self.eng.scrolling)
+
+    def test_partner_that_stops_is_dropped(self):
+        self.frame((SLOT, 0), (TID, 1), (X, -300), (Y, 400), (MAJOR, 600),
+                   (SLOT, 1), (TID, 2), (X, 300), (Y, 450), (MAJOR, 600))
+        for i in range(1, 20):
+            self.frame((SLOT, 0), (Y, 400 + 30 * i), (SLOT, 1), (Y, 450 + 25 * i))
+        for i in range(20, 45):  # finger 2 rests, finger 1 keeps going
+            self.frame((SLOT, 0), (Y, 400 + 30 * i))
+        self.assertEqual(self.eng.primary, (1,))
+
+
+if __name__ == "__main__":
+    unittest.main()
