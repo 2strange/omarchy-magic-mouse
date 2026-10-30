@@ -467,6 +467,116 @@ def write_status(data: dict) -> None:
 
 
 # --------------------------------------------------------------------------- actions
+PROBE_PATH = os.path.join(STATUS_DIR, "probe.sock")
+PROBE_MAX_CLIENTS = 4
+
+
+class Probe:
+    """Live touch stream for the preview window: a Unix socket in the owner-only
+    status directory. Each connected client gets one JSON line per input frame
+    (a "hello" line first with the surface geometry). Clients only listen; what
+    they send is discarded. A client that cannot keep up loses frames instead of
+    stalling the daemon, and nothing is computed while nobody is connected."""
+
+    def __init__(self) -> None:
+        self.sock: socket.socket | None = None
+        self.clients: list[socket.socket] = []
+        self.stalls: dict[socket.socket, int] = {}  # consecutive frames a client could not take
+        self.hello: dict = {}
+
+    def open(self) -> None:
+        try:
+            os.close(open_private_dir(STATUS_DIR))  # create 0700 / refuse an unsafe directory
+            try:
+                st = os.lstat(PROBE_PATH)
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISSOCK(st.st_mode):
+                    raise OSError(errno.EEXIST, "not a socket, refusing to replace it", PROBE_PATH)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC) as other:
+                    try:
+                        other.connect(PROBE_PATH)
+                    except OSError:
+                        pass  # stale socket from a previous run
+                    else:
+                        raise OSError(errno.EADDRINUSE, "another daemon owns the probe socket", PROBE_PATH)
+                os.unlink(PROBE_PATH)
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            sock.bind(PROBE_PATH)
+            os.chmod(PROBE_PATH, 0o600)
+            sock.listen(PROBE_MAX_CLIENTS)
+            self.sock = sock
+            log(f"probe: {PROBE_PATH}")
+        except OSError as exc:
+            log(f"probe disabled: {exc}")
+
+    def fds(self) -> list:
+        return ([self.sock] if self.sock else []) + self.clients
+
+    def handle(self, ready: list) -> None:
+        if self.sock and self.sock in ready:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                conn = None
+            if conn is not None:
+                if len(self.clients) >= PROBE_MAX_CLIENTS:
+                    conn.close()
+                else:
+                    conn.setblocking(False)
+                    self.clients.append(conn)
+                    self.send(dict(self.hello, type="hello"), [conn])
+        for c in [c for c in self.clients if c in ready]:
+            try:
+                data = c.recv(4096)
+            except BlockingIOError:
+                continue
+            except OSError:
+                data = b""
+            if not data:
+                self.drop(c)
+
+    def send(self, obj: dict, targets: list | None = None) -> None:
+        line = (json.dumps(obj, separators=(",", ":")) + "\n").encode()
+        for c in list(targets if targets is not None else self.clients):
+            try:
+                sent = c.send(line, socket.MSG_DONTWAIT | socket.MSG_NOSIGNAL)
+            except BlockingIOError:
+                # slow reader: skip this frame for it; one that never reads gives its slot back
+                self.stalls[c] = self.stalls.get(c, 0) + 1
+                if self.stalls[c] > 200:
+                    self.drop(c)
+                continue
+            except OSError:
+                self.drop(c)
+                continue
+            if sent < len(line):
+                self.drop(c)  # a cut line would corrupt the stream
+            else:
+                self.stalls.pop(c, None)
+
+    def drop(self, c: socket.socket) -> None:
+        if c in self.clients:
+            self.clients.remove(c)
+        self.stalls.pop(c, None)
+        try:
+            c.close()
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        for c in list(self.clients):
+            self.drop(c)
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+            try:
+                os.unlink(PROBE_PATH)
+            except OSError:
+                pass
+
+
 def hypr_socket() -> str | None:
     rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
@@ -621,6 +731,9 @@ class Engine:
         self.ui = ui
         self.verbose = verbose
         self.record = None  # --record: raw input events, one "ts type code value" line each
+        self.probe: "Probe | None" = None  # live touch view for the preview window
+        self.why = ""  # why the last frame did (or did not) scroll; for the probe
+        self.why_locked = False
         self.curve = AppleCurve(float(cfg["pointer"]["tracking_speed"]))
         self.res_x = TOUCH_UNITS_PER_MM
         self.res_y = TOUCH_UNITS_PER_MM
@@ -645,7 +758,7 @@ class Engine:
         self.hold_acc = [0.0, 0.0]
         self.recent: collections.deque = collections.deque()  # (ts, raw distance): how much the mouse itself moved lately
         # touch
-        self.slots: dict[int, list] = {}  # slot -> [tracking_id, x, y]
+        self.slots: dict[int, list] = {}  # slot -> [tracking_id, x, y, touch_major, touch_minor]
         self.cur_slot = 0
         self.mt_frame = False  # this SYN_REPORT included ABS_MT_* (a HID touch report)
         self.mt_seen: set[int] = set()  # slots mentioned in this touch report
@@ -719,7 +832,8 @@ class Engine:
             info = self.dev.absinfo(e.ABS_MT_SLOT)
             n = info.max + 1
             cols = {}
-            for code in (e.ABS_MT_TRACKING_ID, e.ABS_MT_POSITION_X, e.ABS_MT_POSITION_Y):
+            for code in (e.ABS_MT_TRACKING_ID, e.ABS_MT_POSITION_X, e.ABS_MT_POSITION_Y,
+                         e.ABS_MT_TOUCH_MAJOR, e.ABS_MT_TOUCH_MINOR):
                 buf = array.array("i", [code] + [0] * n)
                 fcntl.ioctl(self.dev.fd, EVIOCGMTSLOTS(len(buf) * buf.itemsize), buf, True)
                 cols[code] = buf[1:]
@@ -727,7 +841,8 @@ class Engine:
             log(f"touch state: {exc}")
             return
         self.slots = {
-            i: [cols[e.ABS_MT_TRACKING_ID][i], cols[e.ABS_MT_POSITION_X][i], cols[e.ABS_MT_POSITION_Y][i]]
+            i: [cols[e.ABS_MT_TRACKING_ID][i], cols[e.ABS_MT_POSITION_X][i], cols[e.ABS_MT_POSITION_Y][i],
+                cols[e.ABS_MT_TOUCH_MAJOR][i], cols[e.ABS_MT_TOUCH_MINOR][i]]
             for i in range(n) if cols[e.ABS_MT_TRACKING_ID][i] >= 0
         }
         self.cur_slot = info.value
@@ -801,13 +916,17 @@ class Engine:
                 self.cur_slot = ev.value
             self.mt_seen.add(self.cur_slot)
             if ev.code != e.ABS_MT_SLOT:
-                slot = self.slots.setdefault(self.cur_slot, [-1, 0, 0])
+                slot = self.slots.setdefault(self.cur_slot, [-1, 0, 0, 0, 0])
                 if ev.code == e.ABS_MT_TRACKING_ID:
                     slot[0] = ev.value
                 elif ev.code == e.ABS_MT_POSITION_X:
                     slot[1] = ev.value
                 elif ev.code == e.ABS_MT_POSITION_Y:
                     slot[2] = ev.value
+                elif ev.code == e.ABS_MT_TOUCH_MAJOR:
+                    slot[3] = ev.value
+                elif ev.code == e.ABS_MT_TOUCH_MINOR:
+                    slot[4] = ev.value
             return
 
     def resync(self, ts: float) -> None:
@@ -869,6 +988,34 @@ class Engine:
         if clicked:
             self.session_clicked = True  # after touch(), so a same-frame landing can't reset it
         self.ui.syn()
+        if self.probe and self.probe.clients:
+            self.publish(ts)
+
+    def moving_now(self, ts: float) -> bool:
+        """pointer_moving() without pruning self.recent, so watching never changes behaviour."""
+        sc = self.cfg["scroll"]
+        cut = ts - float(sc["settle_ms"]) / 1000.0
+        return sum(d for t, d in self.recent if t >= cut) > float(sc["settle_counts"])
+
+    def publish(self, ts: float) -> None:
+        """One probe frame: every contact with its size and role, plus the decision."""
+        follow = set(self.primary or ())
+        contacts = []
+        for v in self.slots.values():
+            if v[0] < 0:
+                continue
+            t = self.touches.get(v[0])
+            role = "grip" if t and t.grip else "follow" if v[0] in follow else "rest"
+            contacts.append([v[0], v[1], v[2], v[3], v[4], role])
+        self.probe.send({
+            "t": round(ts, 4),
+            "c": contacts,
+            "scroll": self.scrolling,
+            "axis": self.axis,
+            "coast": self.coasting,
+            "moving": self.moving_now(ts),
+            "why": self.why,
+        })
 
     def pointer(self, ts: float, dx: int, dy: int) -> None:
         p = self.cfg["pointer"]
@@ -976,8 +1123,10 @@ class Engine:
             else:
                 t.update(ts, x, y)
 
+        self.why_locked = False  # a gesture's reason must not be overwritten later in the frame
         fingers = sorted(tid for tid, t in self.touches.items() if not t.grip)
         if not fingers:
+            self.why = "only grip fingers" if self.touches else "no touch"
             # A 1–2 report dropout (TOUCH_STATE_NONE, or the kernel leaving a
             # slot up because it never syncs unused contacts) looks like a lift.
             # Wait BRIDGE_MS before ending the scroll so a flicker can hand off.
@@ -1007,6 +1156,7 @@ class Engine:
         key = self.pick(fingers)
         if key is None:
             if self.scrolling:
+                self.why = "scroll end: " + self.why
                 self.end_scroll(ts)
             self.primary = None  # everything is resting: nothing to follow
             self.t_ref = None
@@ -1032,11 +1182,13 @@ class Engine:
         moves = sorted(((math.hypot(*self.touches[t].recent()) / self.res_x, t) for t in fingers), reverse=True)
         (m1, t1), (m2, t2) = moves[0], moves[1]
         if m1 < MOVING_MM:
+            self.why = "all fingers resting"
             return self.primary if down(self.primary) else None
         if m2 >= MOVING_MM and m2 >= 0.5 * m1:
             (ax, ay), (bx, by) = self.touches[t1].recent(), self.touches[t2].recent()
             if ax * bx + ay * by > 0:
                 return tuple(sorted((t1, t2)))  # two fingers moving together
+            self.why = "two fingers moving apart (pinch)"
             return None  # moving apart: a pinch, not a scroll
         return (t1,)
 
@@ -1063,6 +1215,8 @@ class Engine:
             action = g["two_finger_swipe_left"] if dx_mm < 0 else g["two_finger_swipe_right"]
             if self.verbose:
                 log("two-finger swipe " + ("left" if dx_mm < 0 else "right"))
+            self.why = "two-finger swipe " + ("left" if dx_mm < 0 else "right")
+            self.why_locked = True
             run_action(str(action))
 
     def follow(self, ts: float, key: tuple[int, ...], x: float, y: float) -> None:
@@ -1077,6 +1231,7 @@ class Engine:
             self.t_ref = (x, y)
             if not self.scrolling:
                 self.s_vel = 0.0
+                self.why = "finger landed or changed: anchor"
             self.s_last_t = ts
             return
 
@@ -1087,6 +1242,7 @@ class Engine:
 
         if not self.scrolling:
             if self.pressed or ts - self.last_button_t < CLICK_QUIET:
+                self.why = "button pressed or click pause"
                 self.t_ref = (x, y)
                 return
             if self.pointer_moving(ts):
@@ -1097,13 +1253,20 @@ class Engine:
                 vy = sum(self.touches[t].recent()[1] for t in key) / len(key) / self.res_y
                 slide = math.hypot(vx, vy)
                 if slide < max(float(s["start_mm"]), MIN_SLIDE_MM) or slide < POINTER_RATIO * self.pointer_mm(ts, MOVE_WINDOW):
+                    self.why = "mouse moving: finger slide too small"
                     self.t_ref = (x, y)
                     return
                 dx_mm, dy_mm = vx, vy
-            elif math.hypot(dx_mm, dy_mm) < float(s["start_mm"]) or self.key_recent_mm(key) < MOVING_MM:
-                return  # not far enough yet, or only creeping: a resting finger rolls and drifts slowly
+            elif math.hypot(dx_mm, dy_mm) < float(s["start_mm"]):
+                self.why = "below start distance"
+                return  # not far enough yet
+            elif self.key_recent_mm(key) < MOVING_MM:
+                self.why = "finger only creeping"
+                return  # a resting finger rolls and drifts slowly
             self.axis = "x" if abs(dx_mm) > HORIZONTAL_RATIO * abs(dy_mm) else "y"
             if self.axis == "x" and (not s["horizontal"] or len(key) == 2):
+                if not self.why_locked:
+                    self.why = "sideways with two fingers (gesture)" if len(key) == 2 else "horizontal scroll off"
                 self.t_ref = (x, y)  # sideways with two fingers is the workspace gesture
                 return
             self.scrolling = True
@@ -1116,6 +1279,7 @@ class Engine:
             self.s_rem = 0.0
             self.s_notch = 0
             self.s_last_t = ts
+            self.why = f"scroll start ({len(key)} finger{'s' if len(key) > 1 else ''}, {self.axis})"
             if self.verbose:
                 log(f"scroll start axis={self.axis} fingers={len(key)}")
             return
@@ -1127,9 +1291,11 @@ class Engine:
             # the mouse moves farther than the finger slides: this is mousing now, not
             # scrolling (a resting finger wiggles as the hand pushes). Stop, no glide.
             self.scrolling = False
+            self.why = "scroll stop: mouse moves more than finger"
             if self.verbose:
                 log("scroll stop (pointer moving)")
             return
+        self.why = f"scrolling ({len(key)} finger{'s' if len(key) > 1 else ''}, {self.axis})"
         d_mm = dy_mm if self.axis == "y" else dx_mm
         self.s_travel += d_mm
         dt = max(ts - self.s_last_t, 0.0)
@@ -1249,6 +1415,16 @@ def run_session(dev: InputDevice, ui: UInput, eng: Engine, cfg_path: str, hypr: 
     next_battery = 0.0
     write_status({"connected": True, "model": dev.name, "ts": time.time()})
     try:
+        if eng.probe:
+            geo = {"model": dev.name, "product": f"{dev.info.product:04x}", "res": TOUCH_UNITS_PER_MM}
+            for key, code in (("x", e.ABS_MT_POSITION_X), ("y", e.ABS_MT_POSITION_Y), ("major", e.ABS_MT_TOUCH_MAJOR)):
+                try:
+                    info = dev.absinfo(code)
+                    geo[key] = [info.min, info.max]
+                except OSError:
+                    pass
+            eng.probe.hello = geo
+            eng.probe.send(dict(geo, type="hello"))
         while True:
             now = time.monotonic()
             if eng.cfg["battery"]["enabled"] and now >= next_battery:
@@ -1264,8 +1440,10 @@ def run_session(dev: InputDevice, ui: UInput, eng: Engine, cfg_path: str, hypr: 
             hypr.connect(now)
             hypr.sync_binding(bool(eng.cfg["buttons"]["control_click"]), now)
             timeout = TICK if eng.coasting else 0.25
-            fds = [dev.fd] + ([hypr] if hypr.sock else [])
+            fds = [dev.fd] + ([hypr] if hypr.sock else []) + (eng.probe.fds() if eng.probe else [])
             r, _, _ = select.select(fds, [], [], timeout)
+            if eng.probe:
+                eng.probe.handle(r)
             now = time.monotonic()
             if dev.fd in r:
                 try:
@@ -1297,6 +1475,8 @@ def run_session(dev: InputDevice, ui: UInput, eng: Engine, cfg_path: str, hypr: 
             except OSError:
                 pass
         eng.reset_touch()
+        if eng.probe:
+            eng.probe.send({"type": "disconnected"})
         write_status({"connected": False, "model": dev.name, "ts": time.time()})
         log("released grab")
 
@@ -1307,6 +1487,7 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="log scroll starts and momentum")
     ap.add_argument("--list", action="store_true", help="show detected Magic Mouse and exit")
     ap.add_argument("--record", metavar="PATH", help="append the mouse's raw input events to PATH (for debugging)")
+    ap.add_argument("--no-probe", action="store_true", help="do not open the live touch socket for the preview window")
     args = ap.parse_args()
 
     if args.list:
@@ -1325,6 +1506,9 @@ def main() -> int:
     if args.record:
         eng.record = open(args.record, "a", buffering=1)
         log(f"recording raw input to {args.record}")
+    if not args.no_probe:
+        eng.probe = Probe()
+        eng.probe.open()
     hypr = HyprEvents()
     # systemctl stop sends SIGTERM; exit through the finally blocks so buttons
     # are released and the Control-click binding is taken back out of Hyprland.
@@ -1344,6 +1528,8 @@ def main() -> int:
         if hypr.sock and hypr.bound:
             hypr.sync_binding(False, time.monotonic())
         hypr.close()
+        if eng.probe:
+            eng.probe.close()
         ui.close()
     return 0
 

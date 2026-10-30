@@ -321,6 +321,37 @@ Panel {
           }
         }
 
+        // ---------- Diagnostics ----------
+        PanelSectionHeader { text: "DIAGNOSTICS"; foreground: root.fg; fontFamily: root.fontFam }
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(previewLabels.implicitHeight, previewButton.implicitHeight)
+          Column {
+            id: previewLabels
+            anchors.left: parent.left
+            anchors.right: previewButton.left
+            anchors.rightMargin: Style.space(12)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(2)
+            Text { text: "Touch preview"; color: root.fg; font.family: root.fontFam; font.pixelSize: Style.font.body; width: parent.width; elide: Text.ElideRight }
+            Text { text: "Live view of every contact, its size and why the daemon scrolls or not"; color: root.dim; font.family: root.fontFam; font.pixelSize: Style.font.caption; width: parent.width; wrapMode: Text.WordWrap }
+          }
+          PanelActionButton {
+            id: previewButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "󰍽"
+            tooltipText: "Open the touch preview window"
+            foreground: root.fg
+            fontFamily: root.fontFam
+            bordered: true
+            onClicked: {
+              Quickshell.execDetached(["qs", "-p", decodeURIComponent(Qt.resolvedUrl("preview").toString().replace(/^file:\/\//, ""))])
+              root.close()
+            }
+          }
+        }
+
         // ---------- Bar ----------
         PanelSectionHeader { text: "BAR"; foreground: root.fg; fontFamily: root.fontFam }
         SwitchRow {

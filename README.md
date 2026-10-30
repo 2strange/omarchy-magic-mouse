@@ -129,6 +129,16 @@ effective config as JSON.
 | glide too long / too short | `momentum.decay` 0.95 / 0.985 |
 | no glide | `momentum.enabled = false` |
 
+## Touch preview
+
+The daemon publishes a live stream of the touch surface on a private Unix socket
+(`$XDG_RUNTIME_DIR/magic-mouse/probe.sock`, owner-only). Open **Touch preview** in
+the bar menu (or run `qs -p ~/.config/omarchy/plugins/io.github.maikunari.magic-mouse/preview`)
+to see every contact with its size and role (followed, resting, grip) and the
+reason the daemon scrolls or does not ("below start distance", "click pause",
+"sideways with two fingers (gesture)", …). Nothing is sent while no window is
+connected. `--no-probe` turns the socket off.
+
 ## Remove
 
 ```sh
