@@ -432,6 +432,11 @@ Panel {
               root.set("gestures", "two_finger_swipe_right", on ? "" : 'dispatch hl.dsp.focus({ workspace = "e-1" })')
             }
           }
+          Text {
+            width: parent.width
+            text: "Swipe distance applies to the two-finger swipe and the one-finger page flick"
+            color: root.dim; font.family: root.fontFam; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
+          }
           SliderRow {
             label: "Swipe distance"
             valueText: root.fmt1(root.val("gestures", "swipe_mm", 8.0)) + " mm"
@@ -442,6 +447,8 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.space(6)
+            // only the default workspace actions know about an end; custom commands run as they are
+            visible: String(root.val("gestures", "two_finger_swipe_left", "")).indexOf('workspace = "e') !== -1
             Text { text: "At the last workspace"; color: root.fg; font.family: root.fontFam; font.pixelSize: Style.font.body }
             ButtonGroup {
               width: parent.width

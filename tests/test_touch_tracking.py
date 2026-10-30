@@ -9,6 +9,7 @@ import importlib.util
 import os
 import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DAEMON = os.path.join(ROOT, "bin", "magic-mouse-daemon")
@@ -126,20 +127,21 @@ class TouchTracking(unittest.TestCase):
         self.assertEqual(self.eng.primary, (1,))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 @unittest.skipIf(SKIP, SKIP)
 class WorkspaceSwipeEnd(unittest.TestCase):
-    """workspace_step against a fake Hyprland with workspaces 1, 2 and 4 open."""
+    """workspace_step against a fake Hyprland: 1, 2 and 4 open on monitor 0, 3 on monitor 1."""
 
-    def step(self, current, forward, end):
-        sent = []
-        replies = {"j/workspaces": '[{"id":1},{"id":2},{"id":4},{"id":-98}]',
-                   "j/activeworkspace": '{"id":%d}' % current}
-        old_req, old_thread = daemon.hypr_request, daemon.threading.Thread
-        daemon.hypr_request = lambda cmd, timeout=0.5: replies.get(cmd) if cmd.startswith("j/") else sent.append(cmd)
+    def step(self, current, forward, end, monitor=0):
+        sent, ran = [], []
+        replies = {"j/workspaces": '[{"id":1,"monitorID":0},{"id":2,"monitorID":0},{"id":3,"monitorID":1},'
+                                   '{"id":4,"monitorID":0},{"id":-98,"monitorID":0}]',
+                   "j/activeworkspace": '{"id":%d,"monitorID":%d}' % (current, monitor)}
+
+        def request(cmd, timeout=0.5):
+            if cmd.startswith("j/"):
+                return replies.get(cmd)
+            sent.append(cmd.split('"')[1])
 
         class Now:  # run the worker inline
             def __init__(self, target, daemon=None):
@@ -147,22 +149,26 @@ class WorkspaceSwipeEnd(unittest.TestCase):
 
             def start(self):
                 self.target()
-        daemon.threading.Thread = Now
-        try:
-            daemon.workspace_step(forward, end)
-        finally:
-            daemon.hypr_request, daemon.threading.Thread = old_req, old_thread
-        return [c.split('"')[1] for c in sent]
+        with mock.patch.object(daemon, "hypr_request", request), \
+                mock.patch.object(daemon, "run_action", ran.append), \
+                mock.patch.object(daemon, "threading", types.SimpleNamespace(Thread=Now, Lock=daemon.threading.Lock)):
+            daemon.workspace_step(forward, end, "FALLBACK")
+        return sent, ran
 
-    def test_next_open_workspace_skips_the_gap(self):
-        self.assertEqual(self.step(2, True, "stop"), ["4"])
+    def test_next_open_workspace_on_this_monitor(self):
+        self.assertEqual(self.step(2, True, "stop"), (["4"], []))  # 3 is on the other monitor
 
     def test_end_behaviour_forward(self):
-        self.assertEqual(self.step(4, True, "stop"), [])
-        self.assertEqual(self.step(4, True, "new"), ["5"])
-        self.assertEqual(self.step(4, True, "wrap"), ["1"])
+        self.assertEqual(self.step(4, True, "stop"), ([], []))
+        self.assertEqual(self.step(4, True, "new"), (["emptynm"], []))
 
     def test_end_behaviour_backward(self):
-        self.assertEqual(self.step(1, False, "stop"), [])
-        self.assertEqual(self.step(1, False, "new"), [])
-        self.assertEqual(self.step(1, False, "wrap"), ["4"])
+        self.assertEqual(self.step(1, False, "stop"), ([], []))
+        self.assertEqual(self.step(1, False, "new"), ([], []))
+
+    def test_named_workspace_runs_the_plain_action(self):
+        self.assertEqual(self.step(-5, True, "stop"), ([], ["FALLBACK"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -763,26 +763,36 @@ WORKSPACE_NEXT = 'workspace = "e+1"'
 WORKSPACE_PREV = 'workspace = "e-1"'
 
 
-def workspace_step(forward: bool, end: str) -> None:
-    """Go to the next or previous open workspace; at the end, wrap, open a new one or stop."""
+_ws_lock = threading.Lock()  # one step at a time, so a quick second swipe sees the first one's result
+
+
+def workspace_step(forward: bool, end: str, fallback: str) -> None:
+    """Next or previous open workspace on the focused monitor (like Hyprland's e+1 / e-1);
+    at the end open a new one ("new", forward only) or do nothing ("stop").
+    On a named workspace (negative id) the plain action runs instead."""
     def run() -> None:
-        try:
-            spaces = json.loads(hypr_request("j/workspaces") or "[]")
-            cur = int(json.loads(hypr_request("j/activeworkspace") or "{}").get("id", 0))
-        except (ValueError, TypeError, AttributeError) as exc:
-            log(f"workspace step: {exc}")
-            return
-        ids = sorted({int(w["id"]) for w in spaces if isinstance(w, dict) and int(w.get("id", 0)) > 0})
-        if not ids or cur <= 0:
-            return
-        if forward:
-            later = [i for i in ids if i > cur]
-            target = later[0] if later else ids[0] if end == "wrap" else cur + 1 if end == "new" else None
-        else:
-            earlier = [i for i in ids if i < cur]
-            target = earlier[-1] if earlier else ids[-1] if end == "wrap" else None
-        if target is not None and target != cur:
-            hypr_request(f'dispatch hl.dsp.focus({{ workspace = "{target}" }})')
+        with _ws_lock:
+            try:
+                act = json.loads(hypr_request("j/activeworkspace") or "{}")
+                spaces = json.loads(hypr_request("j/workspaces") or "[]")
+                cur = int(act.get("id", 0))
+                mon = act.get("monitorID")
+                ids = sorted({int(w["id"]) for w in spaces
+                              if isinstance(w, dict) and int(w.get("id", 0)) > 0 and w.get("monitorID") == mon})
+            except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                log(f"workspace step: {exc}")
+                return
+            if cur <= 0 or not ids:
+                run_action(fallback)
+                return
+            if forward:
+                later = [i for i in ids if i > cur]
+                target = str(later[0]) if later else "emptynm" if end == "new" else None
+            else:
+                earlier = [i for i in ids if i < cur]
+                target = str(earlier[-1]) if earlier else None
+            if target is not None:
+                hypr_request(f'dispatch hl.dsp.focus({{ workspace = "{target}" }})')
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -1393,8 +1403,10 @@ class Engine:
             self.why = "two-finger swipe " + ("left" if dx_mm < 0 else "right") + (" (inverted)" if g.get("invert_swipe") else "")
             self.why_locked = True
             end = str(g.get("swipe_end", "wrap"))
+            if end not in ("wrap", "new", "stop"):
+                end = "wrap"
             if end != "wrap" and (WORKSPACE_NEXT in action or WORKSPACE_PREV in action):
-                workspace_step(WORKSPACE_NEXT in action, end)  # the default actions, with the chosen end behaviour
+                workspace_step(WORKSPACE_NEXT in action, end, action)  # the default actions, with the chosen end
             else:
                 run_action(action)
 
