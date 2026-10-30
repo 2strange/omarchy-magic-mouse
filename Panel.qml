@@ -17,7 +17,7 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
   property bool openedFromHotkey: false
-  property string tab: "point"  // Pointer / Scroll / Gestures / Diagnostics
+  property string tab: "point"  // Pointer / Scroll / Gestures / Touch
 
   // Battery info handed over by the bar widget.
   property string batteryText: ""
@@ -246,7 +246,7 @@ Panel {
             { value: "point", label: "Pointer" },
             { value: "scroll", label: "Scroll" },
             { value: "gestures", label: "Gestures" },
-            { value: "diag", label: "Diagnostics" }
+            { value: "touch", label: "Touch" }
           ]
           value: root.tab
           foreground: root.fg
@@ -284,6 +284,15 @@ Panel {
             checked: root.val("buttons", "control_click", false) === true
             onToggled: root.set("buttons", "control_click", !(root.val("buttons", "control_click", false) === true))
           }
+
+          // ---------- Bar ----------
+          PanelSectionHeader { text: "BAR"; foreground: root.fg; fontFamily: root.fontFam }
+          SwitchRow {
+            label: "Show battery percentage"
+            description: "Off shows just the icon; low battery still highlights"
+            checked: root.val("bar", "show_percent", true) === true
+            onToggled: root.set("bar", "show_percent", !(root.val("bar", "show_percent", true) === true))
+          }
         }
 
         Column {
@@ -311,6 +320,12 @@ Panel {
             minimum: 0.3; maximum: 2.0; step: 0.1
             value: root.val("scroll", "start_mm", 0.8)
             onChanged: function(v) { root.set("scroll", "start_mm", Math.round(v * 100) / 100) }
+          }
+          SwitchRow {
+            label: "Diagonal scrolling"
+            description: "Scroll up/down and sideways at once, like in a code editor. Off: each scroll locks to one direction"
+            checked: root.val("scroll", "free_axis", false) === true
+            onToggled: root.set("scroll", "free_axis", !(root.val("scroll", "free_axis", false) === true))
           }
 
           // ---------- Momentum ----------
@@ -351,14 +366,20 @@ Panel {
               root.set("gestures", "two_finger_swipe_right", on ? "" : 'dispatch hl.dsp.focus({ workspace = "e-1" })')
             }
           }
+          SwitchRow {
+            label: "Invert swipe direction"
+            description: "Swap which way the two-finger swipe moves through workspaces"
+            checked: root.val("gestures", "invert_swipe", false) === true
+            onToggled: root.set("gestures", "invert_swipe", !(root.val("gestures", "invert_swipe", false) === true))
+          }
         }
 
         Column {
           width: parent.width
           spacing: Style.space(14)
-          visible: root.tab === "diag"
-          // ---------- Diagnostics ----------
-          PanelSectionHeader { text: "DIAGNOSTICS"; foreground: root.fg; fontFamily: root.fontFam }
+          visible: root.tab === "touch"
+          // ---------- Touch surface ----------
+          PanelSectionHeader { text: "TOUCH SURFACE"; foreground: root.fg; fontFamily: root.fontFam }
           Item {
             width: parent.width
             implicitHeight: Math.max(previewLabels.implicitHeight, previewButton.implicitHeight)
@@ -387,14 +408,19 @@ Panel {
               }
             }
           }
-
-          // ---------- Bar ----------
-          PanelSectionHeader { text: "BAR"; foreground: root.fg; fontFamily: root.fontFam }
-          SwitchRow {
-            label: "Show battery percentage"
-            description: "Off shows just the icon; low battery still highlights"
-            checked: root.val("bar", "show_percent", true) === true
-            onToggled: root.set("bar", "show_percent", !(root.val("bar", "show_percent", true) === true))
+          SliderRow {
+            label: "Edge zone (holding the mouse)"
+            valueText: root.val("scroll", "edge_mm", 6.0) <= 0 ? "off" : root.fmt1(root.val("scroll", "edge_mm", 6.0)) + " mm"
+            minimum: 0; maximum: 10; step: 0.5
+            value: root.val("scroll", "edge_mm", 6.0)
+            onChanged: function(v) { root.set("scroll", "edge_mm", Math.round(v * 10) / 10) }
+          }
+          SliderRow {
+            label: "Ignore touches starting at the back (palm)"
+            valueText: root.val("scroll", "palm_zone", 0.2) <= 0 ? "off" : Math.round(root.val("scroll", "palm_zone", 0.2) * 100) + " %"
+            minimum: 0; maximum: 0.4; step: 0.05
+            value: root.val("scroll", "palm_zone", 0.2)
+            onChanged: function(v) { root.set("scroll", "palm_zone", Math.round(v * 100) / 100) }
           }
 
           Text {

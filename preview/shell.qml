@@ -29,6 +29,8 @@ ShellRoot {
   property real fps: 0
   property int frameCount: 0
   property real peakMajor: 0
+  property real edgeMm: 6
+  property real palmZone: 0.2
 
   function handle(line) {
     var o
@@ -67,6 +69,8 @@ ShellRoot {
       shell.coasting = !!o.coast
       shell.moving = !!o.moving
       shell.axis = o.axis || "y"
+      if (o.edge_mm !== undefined) shell.edgeMm = o.edge_mm
+      if (o.palm !== undefined) shell.palmZone = o.palm
     }
   }
 
@@ -90,7 +94,7 @@ ShellRoot {
   readonly property color fg: "#e8e6e3"
   readonly property color dim: "#8a8780"
   readonly property color surface: "#2c2c32"
-  readonly property var roleColor: ({ grip: "#6b6b75", rest: "#5b8def", follow: "#e0a33a" })
+  readonly property var roleColor: ({ grip: "#6b6b75", rest: "#5b8def", follow: "#e0a33a", palm: "#d0605a" })
   readonly property string mono: "JetBrainsMono Nerd Font"
 
   FloatingWindow {
@@ -119,14 +123,18 @@ ShellRoot {
           width: pad.spanX * pad.scale
           height: pad.spanY * pad.scale
           anchors.horizontalCenter: parent.horizontalCenter
-          radius: width / 2
+          radius: width * 0.4
+          clip: true
           color: shell.surface
           border.color: shell.scrolling ? shell.roleColor.follow : "#44444c"
           border.width: shell.scrolling ? 3 : 1
 
-          // grip zones (EDGE_MM from each side)
-          Rectangle { x: 0; width: 6 * shell.unitsPerMm * pad.scale; height: parent.height; color: "#ffffff"; opacity: 0.04; radius: parent.radius }
-          Rectangle { x: parent.width - width; width: 6 * shell.unitsPerMm * pad.scale; height: parent.height; color: "#ffffff"; opacity: 0.04; radius: parent.radius }
+          // edge zones (scroll.edge_mm from each side) and the palm zone at the back
+          Rectangle { x: 0; width: shell.edgeMm * shell.unitsPerMm * pad.scale; height: parent.height; color: "#ffffff"; opacity: 0.05 }
+          Rectangle { x: parent.width - width; width: shell.edgeMm * shell.unitsPerMm * pad.scale; height: parent.height; color: "#ffffff"; opacity: 0.05 }
+          Rectangle { y: parent.height - height; width: parent.width; height: parent.height * shell.palmZone; color: shell.roleColor.palm; opacity: 0.10 }
+          Text { anchors.top: parent.top; anchors.topMargin: 8; anchors.horizontalCenter: parent.horizontalCenter; text: "front"; color: shell.dim; font.family: shell.mono; font.pixelSize: 11 }
+          Text { visible: shell.palmZone > 0; anchors.bottom: parent.bottom; anchors.bottomMargin: 8; anchors.horizontalCenter: parent.horizontalCenter; text: "palm zone"; color: shell.roleColor.palm; font.family: shell.mono; font.pixelSize: 11 }
 
           Repeater {
             model: shell.contacts
@@ -195,7 +203,7 @@ ShellRoot {
         Row {
           spacing: 14
           Repeater {
-            model: [["follow", "followed"], ["rest", "resting"], ["grip", "grip / edge"]]
+            model: [["follow", "followed"], ["rest", "resting"], ["grip", "edge"], ["palm", "palm"]]
             delegate: Row {
               required property var modelData
               spacing: 6

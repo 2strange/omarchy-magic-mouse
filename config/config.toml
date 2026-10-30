@@ -20,6 +20,10 @@ settle_ms = 150      # the mouse counts as moving if it moved within this long..
 settle_counts = 4    # ...by more than this many raw counts. While it moves, the finger must slide 3x farther to scroll
 accel = 0.6          # 0 = linear, 1 = strong ramp with finger speed
 horizontal = true
+free_axis = false    # diagonal scrolling: both axes at once (handy in code editors). false = each scroll locks to one axis
+edge_mm = 6.0        # a touch landing this close to the left/right edge holds the mouse...
+edge_release_mm = 2.0  # ...until it slides this far on the surface; then it can scroll (0 edge_mm = no edge zone)
+palm_zone = 0.2      # share of the surface at the back; touches that start there are ignored as the palm (0 = off)
 
 [buttons]
 middle = "left"      # click in the centre zone: "left" (macOS has no middle click), "middle" (paste on Linux), "right"
@@ -29,6 +33,7 @@ control_click = false  # Control + click = right click, like macOS. Takes Contro
 [gestures]
 swipe_pages = true   # quick one-finger sideways flick = back / forward in browsers
 swipe_mm = 6.0       # finger travel that counts as a swipe
+invert_swipe = false # swap the two-finger swipe directions
 # Hyprland's socket takes Lua here (same call as Omarchy's Super+Tab). Older Hyprland: "dispatch workspace e+1"
 two_finger_swipe_left = 'dispatch hl.dsp.focus({ workspace = "e+1" })'    # like macOS "swipe between full-screen apps"
 two_finger_swipe_right = 'dispatch hl.dsp.focus({ workspace = "e-1" })'
