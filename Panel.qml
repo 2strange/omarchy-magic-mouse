@@ -146,7 +146,7 @@ Panel {
   readonly property var tabKeys: ({
     point: ["pointer.tracking_speed", "buttons.right_click", "buttons.control_click", "bar.show_percent"],
     scroll: ["scroll.natural", "scroll.speed", "scroll.start_mm", "scroll.free_axis", "momentum.enabled", "momentum.decay"],
-    gestures: ["gestures.swipe_pages", "gestures.two_finger_swipe_left", "gestures.two_finger_swipe_right", "gestures.invert_swipe"],
+    gestures: ["gestures.swipe_pages", "gestures.two_finger_swipe_left", "gestures.two_finger_swipe_right", "gestures.invert_swipe", "gestures.swipe_mm", "gestures.swipe_end"],
     touch: ["scroll.edge_left_mm", "scroll.edge_right_mm", "scroll.edge_front_mm", "scroll.edge_back_mm"]
   })
   property var defaults: null
@@ -430,6 +430,32 @@ Panel {
               var on = String(root.val("gestures", "two_finger_swipe_left", "")) !== ""
               root.set("gestures", "two_finger_swipe_left", on ? "" : 'dispatch hl.dsp.focus({ workspace = "e+1" })')
               root.set("gestures", "two_finger_swipe_right", on ? "" : 'dispatch hl.dsp.focus({ workspace = "e-1" })')
+            }
+          }
+          SliderRow {
+            label: "Swipe distance"
+            valueText: root.fmt1(root.val("gestures", "swipe_mm", 8.0)) + " mm"
+            minimum: 4; maximum: 16; step: 0.5
+            value: root.val("gestures", "swipe_mm", 8.0)
+            onChanged: function(v) { root.set("gestures", "swipe_mm", v) }
+          }
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            Text { text: "At the last workspace"; color: root.fg; font.family: root.fontFam; font.pixelSize: Style.font.body }
+            ButtonGroup {
+              width: parent.width
+              options: [
+                { value: "stop", label: "Stop" },
+                { value: "new", label: "New one" },
+                { value: "wrap", label: "Wrap around" }
+              ]
+              value: String(root.val("gestures", "swipe_end", "wrap"))
+              foreground: root.fg
+              fontFamily: root.fontFam
+              fontSize: Style.font.caption
+              focusable: false
+              onChanged: function(v) { root.set("gestures", "swipe_end", v) }
             }
           }
           SwitchRow {

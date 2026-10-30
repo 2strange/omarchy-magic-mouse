@@ -34,8 +34,9 @@ control_click = false  # Control + click = right click, like macOS. Takes Contro
 
 [gestures]
 swipe_pages = true   # quick one-finger sideways flick = back / forward in browsers
-swipe_mm = 6.0       # finger travel that counts as a swipe
+swipe_mm = 8.0       # finger travel that counts as a swipe
 invert_swipe = false # swap the two-finger swipe directions
+swipe_end = "wrap"   # at the last/first workspace: "wrap" around, open a "new" one, or "stop"
 # Hyprland's socket takes Lua here (same call as Omarchy's Super+Tab). Older Hyprland: "dispatch workspace e+1"
 two_finger_swipe_left = 'dispatch hl.dsp.focus({ workspace = "e+1" })'    # like macOS "swipe between full-screen apps"
 two_finger_swipe_right = 'dispatch hl.dsp.focus({ workspace = "e-1" })'

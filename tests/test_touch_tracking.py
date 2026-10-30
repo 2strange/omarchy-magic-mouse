@@ -128,3 +128,41 @@ class TouchTracking(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(SKIP, SKIP)
+class WorkspaceSwipeEnd(unittest.TestCase):
+    """workspace_step against a fake Hyprland with workspaces 1, 2 and 4 open."""
+
+    def step(self, current, forward, end):
+        sent = []
+        replies = {"j/workspaces": '[{"id":1},{"id":2},{"id":4},{"id":-98}]',
+                   "j/activeworkspace": '{"id":%d}' % current}
+        old_req, old_thread = daemon.hypr_request, daemon.threading.Thread
+        daemon.hypr_request = lambda cmd, timeout=0.5: replies.get(cmd) if cmd.startswith("j/") else sent.append(cmd)
+
+        class Now:  # run the worker inline
+            def __init__(self, target, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+        daemon.threading.Thread = Now
+        try:
+            daemon.workspace_step(forward, end)
+        finally:
+            daemon.hypr_request, daemon.threading.Thread = old_req, old_thread
+        return [c.split('"')[1] for c in sent]
+
+    def test_next_open_workspace_skips_the_gap(self):
+        self.assertEqual(self.step(2, True, "stop"), ["4"])
+
+    def test_end_behaviour_forward(self):
+        self.assertEqual(self.step(4, True, "stop"), [])
+        self.assertEqual(self.step(4, True, "new"), ["5"])
+        self.assertEqual(self.step(4, True, "wrap"), ["1"])
+
+    def test_end_behaviour_backward(self):
+        self.assertEqual(self.step(1, False, "stop"), [])
+        self.assertEqual(self.step(1, False, "new"), [])
+        self.assertEqual(self.step(1, False, "wrap"), ["4"])

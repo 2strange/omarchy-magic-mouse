@@ -121,7 +121,7 @@ ShellRoot {
           width: pad.spanX * pad.scale
           height: pad.spanY * pad.scale
           anchors.horizontalCenter: parent.horizontalCenter
-          radius: width * 0.16
+          radius: width * 0.28
           clip: true
           color: shell.surface
           border.color: shell.scrolling ? shell.roleColor.follow : "#44444c"

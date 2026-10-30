@@ -151,8 +151,11 @@ DEFAULTS = {
     },
     "gestures": {
         "swipe_pages": True,  # quick one-finger sideways flick = browser back / forward
-        "swipe_mm": 6.0,  # travel needed for a swipe
+        "swipe_mm": 8.0,  # travel needed for a swipe
         "invert_swipe": False,  # swap the two-finger swipe directions
+        # At the last (or first) workspace the default two-finger swipe actions...
+        # "wrap": jump around to the other end, "new": open a new workspace (forward only), "stop": do nothing
+        "swipe_end": "wrap",
         # Hyprland's socket takes Lua: "dispatch <lua>" runs hl.dispatch(<lua>). Same call as Omarchy's Super+Tab.
         "two_finger_swipe_left": 'dispatch hl.dsp.focus({ workspace = "e+1" })',  # like "swipe between full-screen apps"
         "two_finger_swipe_right": 'dispatch hl.dsp.focus({ workspace = "e-1" })',
@@ -756,6 +759,33 @@ def run_action(cmd: str) -> None:
             log(f"action failed: {exc}")
 
 
+WORKSPACE_NEXT = 'workspace = "e+1"'
+WORKSPACE_PREV = 'workspace = "e-1"'
+
+
+def workspace_step(forward: bool, end: str) -> None:
+    """Go to the next or previous open workspace; at the end, wrap, open a new one or stop."""
+    def run() -> None:
+        try:
+            spaces = json.loads(hypr_request("j/workspaces") or "[]")
+            cur = int(json.loads(hypr_request("j/activeworkspace") or "{}").get("id", 0))
+        except (ValueError, TypeError, AttributeError) as exc:
+            log(f"workspace step: {exc}")
+            return
+        ids = sorted({int(w["id"]) for w in spaces if isinstance(w, dict) and int(w.get("id", 0)) > 0})
+        if not ids or cur <= 0:
+            return
+        if forward:
+            later = [i for i in ids if i > cur]
+            target = later[0] if later else ids[0] if end == "wrap" else cur + 1 if end == "new" else None
+        else:
+            earlier = [i for i in ids if i < cur]
+            target = earlier[-1] if earlier else ids[-1] if end == "wrap" else None
+        if target is not None and target != cur:
+            hypr_request(f'dispatch hl.dsp.focus({{ workspace = "{target}" }})')
+    threading.Thread(target=run, daemon=True).start()
+
+
 # --------------------------------------------------------------------------- engine
 class Engine:
     def __init__(self, cfg: dict, ui: UInput, verbose: bool) -> None:
@@ -1357,12 +1387,16 @@ class Engine:
             left = dx_mm < 0
             if g.get("invert_swipe"):
                 left = not left
-            action = g["two_finger_swipe_left"] if left else g["two_finger_swipe_right"]
+            action = str(g["two_finger_swipe_left"] if left else g["two_finger_swipe_right"])
             if self.verbose:
                 log("two-finger swipe " + ("left" if dx_mm < 0 else "right"))
             self.why = "two-finger swipe " + ("left" if dx_mm < 0 else "right") + (" (inverted)" if g.get("invert_swipe") else "")
             self.why_locked = True
-            run_action(str(action))
+            end = str(g.get("swipe_end", "wrap"))
+            if end != "wrap" and (WORKSPACE_NEXT in action or WORKSPACE_PREV in action):
+                workspace_step(WORKSPACE_NEXT in action, end)  # the default actions, with the chosen end behaviour
+            else:
+                run_action(action)
 
     def follow(self, ts: float, key: tuple[int, ...], x: float, y: float) -> None:
         s = self.cfg["scroll"]
