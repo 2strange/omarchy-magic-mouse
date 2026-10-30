@@ -17,6 +17,7 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
   property bool openedFromHotkey: false
+  property string tab: "point"  // Pointer / Scroll / Gestures / Diagnostics
 
   // Battery info handed over by the bar widget.
   property string batteryText: ""
@@ -239,135 +240,171 @@ Panel {
 
         PanelSeparator { width: parent.width; foreground: root.fg }
 
-        // ---------- Pointer ----------
-        PanelSectionHeader { text: "POINTER"; foreground: root.fg; fontFamily: root.fontFam }
-        SliderRow {
-          label: "Tracking speed"
-          valueText: root.fmt1(root.val("pointer", "tracking_speed", 0.6875)) + (Math.abs(root.val("pointer", "tracking_speed", 0.6875) - 0.6875) < 0.01 ? "  (Apple default)" : "")
-          minimum: 0; maximum: 3; step: 0.0625
-          value: root.val("pointer", "tracking_speed", 0.6875)
-          onChanged: function(v) { root.set("pointer", "tracking_speed", Math.round(v * 10000) / 10000) }
-        }
-
-        // ---------- Clicking ----------
-        PanelSectionHeader { text: "CLICKING"; foreground: root.fg; fontFamily: root.fontFam }
-        SwitchRow {
-          label: "Right-side click is a right click"
-          description: "Off: the whole mouse left-clicks, like macOS with secondary click off"
-          checked: root.val("buttons", "right_click", true) === true
-          onToggled: root.set("buttons", "right_click", !(root.val("buttons", "right_click", true) === true))
-        }
-        SwitchRow {
-          label: "Control-click is a right click"
-          description: "Hold Control and click to open menus, like on a Mac"
-          checked: root.val("buttons", "control_click", false) === true
-          onToggled: root.set("buttons", "control_click", !(root.val("buttons", "control_click", false) === true))
-        }
-
-        // ---------- Scrolling ----------
-        PanelSectionHeader { text: "SCROLLING"; foreground: root.fg; fontFamily: root.fontFam }
-        SwitchRow {
-          label: "Natural scrolling"
-          description: "Content follows the finger"
-          checked: root.val("scroll", "natural", true) === true
-          onToggled: root.set("scroll", "natural", !(root.val("scroll", "natural", true) === true))
-        }
-        SliderRow {
-          label: "Scroll speed"
-          valueText: root.fmt1(root.val("scroll", "speed", 1.0)) + "×"
-          minimum: 0.4; maximum: 2.5; step: 0.1
-          value: root.val("scroll", "speed", 1.0)
-          onChanged: function(v) { root.set("scroll", "speed", Math.round(v * 100) / 100) }
-        }
-        SliderRow {
-          label: "Finger travel before a scroll starts"
-          valueText: root.fmt1(root.val("scroll", "start_mm", 0.8)) + " mm"
-          minimum: 0.3; maximum: 2.0; step: 0.1
-          value: root.val("scroll", "start_mm", 0.8)
-          onChanged: function(v) { root.set("scroll", "start_mm", Math.round(v * 100) / 100) }
-        }
-
-        // ---------- Momentum ----------
-        PanelSectionHeader { text: "MOMENTUM"; foreground: root.fg; fontFamily: root.fontFam }
-        SwitchRow {
-          label: "Momentum scrolling"
-          description: "Flick and lift, the page keeps gliding"
-          checked: root.val("momentum", "enabled", true) === true
-          onToggled: root.set("momentum", "enabled", !(root.val("momentum", "enabled", true) === true))
-        }
-        SliderRow {
-          label: "Glide length"
-          valueText: root.val("momentum", "decay", 0.97) >= 0.983 ? "long (macOS)" : (root.val("momentum", "decay", 0.97) <= 0.955 ? "short" : "medium")
-          minimum: 0.94; maximum: 0.99; step: 0.005
-          value: root.val("momentum", "decay", 0.97)
-          onChanged: function(v) { root.set("momentum", "decay", Math.round(v * 1000) / 1000) }
-        }
-
-        // ---------- Gestures ----------
-        PanelSectionHeader { text: "GESTURES"; foreground: root.fg; fontFamily: root.fontFam }
-        SwitchRow {
-          label: "Swipe between pages"
-          description: "One-finger sideways flick = back / forward"
-          checked: root.val("gestures", "swipe_pages", true) === true
-          onToggled: root.set("gestures", "swipe_pages", !(root.val("gestures", "swipe_pages", true) === true))
-        }
-        SwitchRow {
-          label: "Two-finger swipe switches workspace"
-          checked: String(root.val("gestures", "two_finger_swipe_left", "")) !== ""
-          onToggled: {
-            var on = String(root.val("gestures", "two_finger_swipe_left", "")) !== ""
-            root.set("gestures", "two_finger_swipe_left", on ? "" : 'dispatch hl.dsp.focus({ workspace = "e+1" })')
-            root.set("gestures", "two_finger_swipe_right", on ? "" : 'dispatch hl.dsp.focus({ workspace = "e-1" })')
-          }
-        }
-
-        // ---------- Diagnostics ----------
-        PanelSectionHeader { text: "DIAGNOSTICS"; foreground: root.fg; fontFamily: root.fontFam }
-        Item {
+        ButtonGroup {
           width: parent.width
-          implicitHeight: Math.max(previewLabels.implicitHeight, previewButton.implicitHeight)
-          Column {
-            id: previewLabels
-            anchors.left: parent.left
-            anchors.right: previewButton.left
-            anchors.rightMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(2)
-            Text { text: "Touch preview"; color: root.fg; font.family: root.fontFam; font.pixelSize: Style.font.body; width: parent.width; elide: Text.ElideRight }
-            Text { text: "Live view of every contact, its size and why the daemon scrolls or not"; color: root.dim; font.family: root.fontFam; font.pixelSize: Style.font.caption; width: parent.width; wrapMode: Text.WordWrap }
+          options: [
+            { value: "point", label: "Pointer" },
+            { value: "scroll", label: "Scroll" },
+            { value: "gestures", label: "Gestures" },
+            { value: "diag", label: "Diagnostics" }
+          ]
+          value: root.tab
+          foreground: root.fg
+          fontFamily: root.fontFam
+          fontSize: Style.font.caption
+          focusable: false
+          onChanged: function(v) { root.tab = v }
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(14)
+          visible: root.tab === "point"
+          // ---------- Pointer ----------
+          PanelSectionHeader { text: "POINTER"; foreground: root.fg; fontFamily: root.fontFam }
+          SliderRow {
+            label: "Tracking speed"
+            valueText: root.fmt1(root.val("pointer", "tracking_speed", 0.6875)) + (Math.abs(root.val("pointer", "tracking_speed", 0.6875) - 0.6875) < 0.01 ? "  (Apple default)" : "")
+            minimum: 0; maximum: 3; step: 0.0625
+            value: root.val("pointer", "tracking_speed", 0.6875)
+            onChanged: function(v) { root.set("pointer", "tracking_speed", Math.round(v * 10000) / 10000) }
           }
-          PanelActionButton {
-            id: previewButton
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            iconText: "󰍽"
-            tooltipText: "Open the touch preview window"
-            foreground: root.fg
-            fontFamily: root.fontFam
-            bordered: true
-            onClicked: {
-              Quickshell.execDetached(["qs", "-p", decodeURIComponent(Qt.resolvedUrl("preview").toString().replace(/^file:\/\//, ""))])
-              root.close()
+
+          // ---------- Clicking ----------
+          PanelSectionHeader { text: "CLICKING"; foreground: root.fg; fontFamily: root.fontFam }
+          SwitchRow {
+            label: "Right-side click is a right click"
+            description: "Off: the whole mouse left-clicks, like macOS with secondary click off"
+            checked: root.val("buttons", "right_click", true) === true
+            onToggled: root.set("buttons", "right_click", !(root.val("buttons", "right_click", true) === true))
+          }
+          SwitchRow {
+            label: "Control-click is a right click"
+            description: "Hold Control and click to open menus, like on a Mac"
+            checked: root.val("buttons", "control_click", false) === true
+            onToggled: root.set("buttons", "control_click", !(root.val("buttons", "control_click", false) === true))
+          }
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(14)
+          visible: root.tab === "scroll"
+          // ---------- Scrolling ----------
+          PanelSectionHeader { text: "SCROLLING"; foreground: root.fg; fontFamily: root.fontFam }
+          SwitchRow {
+            label: "Natural scrolling"
+            description: "Content follows the finger"
+            checked: root.val("scroll", "natural", true) === true
+            onToggled: root.set("scroll", "natural", !(root.val("scroll", "natural", true) === true))
+          }
+          SliderRow {
+            label: "Scroll speed"
+            valueText: root.fmt1(root.val("scroll", "speed", 1.0)) + "×"
+            minimum: 0.4; maximum: 2.5; step: 0.1
+            value: root.val("scroll", "speed", 1.0)
+            onChanged: function(v) { root.set("scroll", "speed", Math.round(v * 100) / 100) }
+          }
+          SliderRow {
+            label: "Finger travel before a scroll starts"
+            valueText: root.fmt1(root.val("scroll", "start_mm", 0.8)) + " mm"
+            minimum: 0.3; maximum: 2.0; step: 0.1
+            value: root.val("scroll", "start_mm", 0.8)
+            onChanged: function(v) { root.set("scroll", "start_mm", Math.round(v * 100) / 100) }
+          }
+
+          // ---------- Momentum ----------
+          PanelSectionHeader { text: "MOMENTUM"; foreground: root.fg; fontFamily: root.fontFam }
+          SwitchRow {
+            label: "Momentum scrolling"
+            description: "Flick and lift, the page keeps gliding"
+            checked: root.val("momentum", "enabled", true) === true
+            onToggled: root.set("momentum", "enabled", !(root.val("momentum", "enabled", true) === true))
+          }
+          SliderRow {
+            label: "Glide length"
+            valueText: root.val("momentum", "decay", 0.97) >= 0.983 ? "long (macOS)" : (root.val("momentum", "decay", 0.97) <= 0.955 ? "short" : "medium")
+            minimum: 0.94; maximum: 0.99; step: 0.005
+            value: root.val("momentum", "decay", 0.97)
+            onChanged: function(v) { root.set("momentum", "decay", Math.round(v * 1000) / 1000) }
+          }
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(14)
+          visible: root.tab === "gestures"
+          // ---------- Gestures ----------
+          PanelSectionHeader { text: "GESTURES"; foreground: root.fg; fontFamily: root.fontFam }
+          SwitchRow {
+            label: "Swipe between pages"
+            description: "One-finger sideways flick = back / forward"
+            checked: root.val("gestures", "swipe_pages", true) === true
+            onToggled: root.set("gestures", "swipe_pages", !(root.val("gestures", "swipe_pages", true) === true))
+          }
+          SwitchRow {
+            label: "Two-finger swipe switches workspace"
+            checked: String(root.val("gestures", "two_finger_swipe_left", "")) !== ""
+            onToggled: {
+              var on = String(root.val("gestures", "two_finger_swipe_left", "")) !== ""
+              root.set("gestures", "two_finger_swipe_left", on ? "" : 'dispatch hl.dsp.focus({ workspace = "e+1" })')
+              root.set("gestures", "two_finger_swipe_right", on ? "" : 'dispatch hl.dsp.focus({ workspace = "e-1" })')
             }
           }
         }
 
-        // ---------- Bar ----------
-        PanelSectionHeader { text: "BAR"; foreground: root.fg; fontFamily: root.fontFam }
-        SwitchRow {
-          label: "Show battery percentage"
-          description: "Off shows just the icon; low battery still highlights"
-          checked: root.val("bar", "show_percent", true) === true
-          onToggled: root.set("bar", "show_percent", !(root.val("bar", "show_percent", true) === true))
-        }
-
-        Text {
+        Column {
           width: parent.width
-          text: "More knobs: ~/.config/magic-mouse/config.toml"
-          color: root.dim
-          font.family: root.fontFam
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          spacing: Style.space(14)
+          visible: root.tab === "diag"
+          // ---------- Diagnostics ----------
+          PanelSectionHeader { text: "DIAGNOSTICS"; foreground: root.fg; fontFamily: root.fontFam }
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(previewLabels.implicitHeight, previewButton.implicitHeight)
+            Column {
+              id: previewLabels
+              anchors.left: parent.left
+              anchors.right: previewButton.left
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
+              Text { text: "Touch preview"; color: root.fg; font.family: root.fontFam; font.pixelSize: Style.font.body; width: parent.width; elide: Text.ElideRight }
+              Text { text: "Live view of every contact, its size and why the daemon scrolls or not"; color: root.dim; font.family: root.fontFam; font.pixelSize: Style.font.caption; width: parent.width; wrapMode: Text.WordWrap }
+            }
+            PanelActionButton {
+              id: previewButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰍽"
+              tooltipText: "Open the touch preview window"
+              foreground: root.fg
+              fontFamily: root.fontFam
+              bordered: true
+              onClicked: {
+                Quickshell.execDetached(["qs", "-p", decodeURIComponent(Qt.resolvedUrl("preview").toString().replace(/^file:\/\//, ""))])
+                root.close()
+              }
+            }
+          }
+
+          // ---------- Bar ----------
+          PanelSectionHeader { text: "BAR"; foreground: root.fg; fontFamily: root.fontFam }
+          SwitchRow {
+            label: "Show battery percentage"
+            description: "Off shows just the icon; low battery still highlights"
+            checked: root.val("bar", "show_percent", true) === true
+            onToggled: root.set("bar", "show_percent", !(root.val("bar", "show_percent", true) === true))
+          }
+
+          Text {
+            width: parent.width
+            text: "More knobs: ~/.config/magic-mouse/config.toml"
+            color: root.dim
+            font.family: root.fontFam
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
         }
       }
     }
