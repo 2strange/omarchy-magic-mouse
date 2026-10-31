@@ -1,3 +1,7 @@
+> **This repository is archived.** It continues as **MagicMouse**, its own plugin:
+> **https://github.com/2strange/omarchy-magicmouse** (touchpad mode, touch check, touch preview and more).
+> Install that one instead; same daemon, service and config, so settings carry over.
+
 # omarchy-magic-mouse
 
 Make an Apple Magic Mouse feel like it does on a Mac, on [Omarchy](https://omarchy.org)
